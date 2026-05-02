@@ -4,6 +4,7 @@ from pydantic.alias_generators import to_camel
 
 
 ModelStateLiteral = Literal["loading", "ready", "failed"]
+CasperStateLiteral = Literal["loading", "ready", "failed", "unreachable"]
 
 
 class _CamelModel(BaseModel):
@@ -14,6 +15,7 @@ class _CamelModel(BaseModel):
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     model_state: ModelStateLiteral
+    casper_state: CasperStateLiteral
     session_active: bool
 
 

@@ -15,22 +15,32 @@ flowchart LR
         Canvas -.draws.-> VE
     end
 
-    subgraph BE["バックエンド (FastAPI)"]
+    subgraph BE["本サーバ (FastAPI :8000)"]
         API[HTTP Endpoints]
         Loader["Model Loader<br/>(起動時プリロード)"]
         Pred[SAM2 Predictor]
         Sess["Session Slot<br/>(base_video_path / inference_state)"]
         MStore["MaskStore<br/>(直近の per-frame masks)"]
         Enc["Composite Encoder<br/>(base video＋マスク半透明合成)"]
-        Casper["Casper Runner<br/>(gen-omnimatte-public, subprocess)"]
+        CClient["Casper Client<br/>(httpx)"]
         API --> Sess
         API --> Pred
         Loader --> Pred
         Pred --> Enc
         Pred --> MStore
-        API --> Casper
-        Casper --> Sess
+        API --> CClient
     end
+
+    subgraph SIDE["Casper Sidecar (FastAPI :8001)"]
+        SideAPI[/run, /health/]
+        CHolder["CasperHolder<br/>(起動時プリロード)"]
+        CPipe["Casper Pipeline<br/>(Wan2.1-Fun 1.3B)"]
+        CHolder --> CPipe
+        SideAPI --> CHolder
+    end
+
+    CClient -- "POST /run (multipart)" --> SideAPI
+    SideAPI -- "video/mp4 binary" --> CClient
 
     UI -- "POST /session (mp4 binary)" --> API
     API -- "video_meta" --> UI
@@ -42,10 +52,11 @@ flowchart LR
 
 主な特徴:
 - フロントエンドは Electron アプリ。React がUI、Pixi がキャンバス描画、zustand が状態を担当
-- バックエンドは FastAPI。起動時に SAM2 モデルをプリロード
+- バックエンドは **本サーバ（SAM2 担当, FastAPI :8000）** と **Casper Sidecar（前景削除担当, FastAPI :8001）** の 2 プロセス。両方とも起動時にモデルをプリロード
+- フロントから sidecar は見えない。常に本サーバ 1 本を相手にする
 - 通信はすべて HTTP。mp4 はリクエスト/レスポンスともにバイナリで送受
 - `/segment` のレスポンスはマスク単体ではなく、**サーバ側で base video にマスクを半透明合成済みの mp4**。フロントは `<video>` 1 本で再生するだけになり、原動画とマスク動画の同期問題が発生しない
-- `/remove` は SAM2 マスクで指定した前景を base video から削除した mp4 を返し、**サーバ側のセッションのベース動画も新動画に差し替える**（カスケード）
+- `/remove` は SAM2 マスクで指定した前景を base video から削除した mp4 を返し、**サーバ側のセッションのベース動画も新動画に差し替える**（カスケード）。Casper の重い処理は本サーバ → sidecar への HTTP 経由で実行される
 - バックエンドは常に最大 1 件の動画セッションだけを保持する（新規 `/session` で旧セッションは自動破棄）。クライアント・サーバー間でセッション ID をやり取りしない
 - 直近の SAM2 マスクは `MaskStore` がサーバ側で保持し、`/remove` の入力に使う（フロント⇔サーバ間でマスクを往復させない）
 
@@ -58,13 +69,13 @@ omnimatte-editor/
 ├── README.md
 ├── docs/
 │   └── spec/                       # 本仕様書
-├── server/                         # 本プロジェクトのFastAPIサーバ
+├── server/                         # 本サーバ（SAM2 担当）
 │   ├── __init__.py                 # 空
-│   ├── main.py                     # FastAPIエントリポイント
-│   ├── model.py                    # SAM2モデルのロード状態管理 + 設定値（ハードコード）
+│   ├── main.py                     # FastAPI エントリ。lifespan で SAM2 ロード起動 + sidecar spawn
+│   ├── model.py                    # SAM2 モデルのロード状態管理 + SAM2 / Casper 設定値（ハードコード）
 │   ├── session.py                  # セッションスロット（常に最大1件）。base video の差し替えも担当
 │   ├── mask_store.py               # 直近 SAM2 結果（per-frame バイナリマスク）の単一スロット
-│   ├── removal.py                  # gen-omnimatte-public を subprocess で呼ぶ前景削除ランナ
+│   ├── casper_client.py            # sidecar への HTTP クライアント（httpx）
 │   ├── video_io.py                 # mp4 読み書き、マスク → mp4 エンコード
 │   ├── routes/
 │   │   ├── __init__.py
@@ -73,13 +84,23 @@ omnimatte-editor/
 │   │   ├── segment.py
 │   │   └── removal.py              # POST /remove
 │   └── schemas.py                  # Pydanticスキーマ
+├── casper_server/                  # Casper sidecar（前景削除担当）
+│   ├── __init__.py                 # 空
+│   ├── main.py                     # FastAPI エントリ。lifespan で Casper ロード起動
+│   ├── holder.py                   # CasperHolder（loading/ready/failed の状態保持）
+│   ├── pipeline.py                 # gen-omnimatte-public のラッパ（load_pipeline / run_one_seq）
+│   └── routes/
+│       ├── __init__.py
+│       ├── health.py               # GET /health
+│       └── run.py                  # POST /run （multipart）
 ├── vendor/
 │   ├── sam2/                       # SAM2 公式リポジトリ（依存ライブラリとして配置）
 │   │   └── examples/
 │   │       └── segment_video_server.py
 │   └── gen-omnimatte-public/       # Casper（Wan2.1-1.3B）リポジトリ（git submodule）
-├── run.py                          # 起動スクリプト（uvicorn 起動のみ）
-├── requirements.txt                # SAM2 (-e ./vendor/sam2) を含む
+├── run.py                          # 本サーバ起動スクリプト（uvicorn）。lifespan で sidecar も自動 spawn
+├── run_casper.py                   # sidecar 単独起動スクリプト（クラウド分離・デバッグ用）
+├── requirements.txt                # SAM2 (-e ./vendor/sam2) と Casper sidecar 依存を含む
 └── frontend/
     ├── package.json
     ├── electron.vite.config.ts
@@ -125,15 +146,17 @@ omnimatte-editor/
 
 ```bash
 # 環境構築（初回のみ。project root で実行）
-pip install -r requirements.txt   # SAM2 (-e ./vendor/sam2) と依存ライブラリを一括インストール
+pip install -r requirements.txt   # SAM2 (-e ./vendor/sam2) と Casper sidecar 用の依存を一括インストール
 
 # 起動（推奨・OS 非依存）
 python run.py
 ```
 
-`requirements.txt` の冒頭で `-e ./vendor/sam2` を指定しているため、SAM2 本体は editable インストールされる。`run.py` は単に uvicorn を起動するだけのラッパスクリプト（sys.path 操作は不要）。
+`requirements.txt` の冒頭で `-e ./vendor/sam2` を指定しているため、SAM2 本体は editable インストールされる。`run.py` は本サーバを uvicorn 起動するスクリプトで、本サーバの lifespan が **Casper sidecar (`casper_server`) を自動 spawn する**。ユーザーは追加コマンド不要。
 
-uvicorn を直接使う場合は project root から `uvicorn server.main:app` でも可。
+uvicorn を直接使う場合は project root から `uvicorn server.main:app` でも可（同じく lifespan が sidecar を spawn する）。
+
+**sidecar を別マシンに分離する場合**: GPU マシン側で `python run_casper.py` を起動し、本サーバ側は `OMNIMATTE_SPAWN_CASPER=0` と `CASPER_SIDECAR_BASE=<sidecar URL>` を環境変数に設定する。
 
 ### フロントエンド
 
@@ -188,12 +211,15 @@ sequenceDiagram
 
 | モジュール | 責務 | 詳細仕様 |
 |---|---|---|
-| `server/main.py` | FastAPI 起動、ルータ登録、CORS、lifespan で非同期ロード起動 | [03-backend.md](03-backend.md) |
-| `server/model.py` | SAM2 モデルのロード状態管理 + 設定値ハードコード | [03-backend.md](03-backend.md) |
+| `server/main.py` | FastAPI 起動、ルータ登録、CORS、lifespan で SAM2 ロード起動 + sidecar spawn | [03-backend.md](03-backend.md) |
+| `server/model.py` | SAM2 モデルのロード状態管理 + SAM2 / Casper 設定値ハードコード | [03-backend.md](03-backend.md) |
 | `server/session.py` | 現在の `inference_state` と base video を保持する単一スロット。`swap_base_video` でベース動画差し替え | [03-backend.md](03-backend.md) |
 | `server/mask_store.py` | 直近 SAM2 マスクの単一スロット | [03-backend.md](03-backend.md) |
-| `server/removal.py` | Casper（gen-omnimatte-public）の subprocess 呼び出し | [03-backend.md](03-backend.md) |
+| `server/casper_client.py` | sidecar への HTTP クライアント（`httpx`）。マスクを mp4 化して `POST /run` に送る | [03-backend.md](03-backend.md) |
 | `server/video_io.py` | mp4 デコード、base video＋マスクの半透明合成 mp4 エンコード、マスク → mp4 書き出し | [03-backend.md](03-backend.md) |
+| `casper_server/main.py` | Casper sidecar の FastAPI エントリ。lifespan で Casper プリロード | [03-backend.md](03-backend.md) |
+| `casper_server/holder.py` | Casper パイプラインのロード状態管理（SAM2 の `ModelHolder` と同パターン） | [03-backend.md](03-backend.md) |
+| `casper_server/pipeline.py` | gen-omnimatte-public の `load_pipeline` / `run_inference` 相当を `absl` 非依存に再実装 | [03-backend.md](03-backend.md) |
 | `frontend/src/renderer/store/videoStore.ts` | zustandストア + VideoElement同期 | [08-state-management.md](08-state-management.md) |
 | `frontend/src/renderer/components/Canvas/VideoCanvas.ts` | Pixi 描画ロジック | [07-pixi-canvas.md](07-pixi-canvas.md) |
 | `frontend/src/renderer/components/Canvas/CanvasView.tsx` | Pixi クラスを React コンポーネントとしてラップ | [07-pixi-canvas.md](07-pixi-canvas.md) |

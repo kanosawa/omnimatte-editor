@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import sys
 from typing import Literal
 
 
@@ -14,9 +13,8 @@ SAM2_CFG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 SAM2_CKPT = os.path.join(_sam2_dir, "checkpoints/sam2.1_hiera_large.pt")
 SAM2_DEVICE = "cuda"
 
-# Casper（gen-omnimatte-public）関連の設定
+# Casper（gen-omnimatte-public）関連の設定。本サーバ・sidecar の双方から参照する
 CASPER_REPO_DIR = os.path.join(_project_root, "vendor", "gen-omnimatte-public")
-CASPER_PYTHON = sys.executable
 CASPER_TRANSFORMER_PATH = os.path.join(
     CASPER_REPO_DIR, "models", "Casper", "wan2.1_fun_1.3b_casper.safetensors"
 )
@@ -27,6 +25,14 @@ CASPER_NUM_INFERENCE_STEPS = 1
 CASPER_TEMPORAL_WINDOW_SIZE = 21
 CASPER_MATTING_MODE = "all_fg"
 CASPER_DEFAULT_PROMPT = "a clean background video."
+
+# sidecar との通信制御（環境変数でオーバーライド可）
+CASPER_PORT = int(os.environ.get("OMNIMATTE_CASPER_PORT", "8001"))
+CASPER_SIDECAR_BASE = os.environ.get(
+    "CASPER_SIDECAR_BASE", f"http://127.0.0.1:{CASPER_PORT}"
+)
+SPAWN_CASPER = os.environ.get("OMNIMATTE_SPAWN_CASPER", "1") != "0"
+CASPER_STARTUP_TIMEOUT_SEC = float(os.environ.get("CASPER_STARTUP_TIMEOUT_SEC", "5.0"))
 
 
 ModelState = Literal["loading", "ready", "failed"]

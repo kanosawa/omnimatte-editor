@@ -1,16 +1,18 @@
 import logging
 import os
+import tempfile
 
 import torch
 from fastapi import APIRouter, HTTPException, Response
 
+from server.casper_client import (
+    CasperBusyError,
+    CasperRunError,
+    CasperUnreachableError,
+    run_casper,
+)
 from server.mask_store import mask_store
 from server.model import SAM2_DEVICE, model_holder
-from server.removal import (
-    CasperRunError,
-    CasperWeightMissingError,
-    run_foreground_removal,
-)
 from server.session import session_slot
 from server.video_io import probe_video
 
@@ -48,13 +50,15 @@ async def remove_foreground() -> Response:
     fps = session.fps
 
     try:
-        new_video_path = await run_foreground_removal(
+        mp4_bytes = await run_casper(
             base_video_path=base_video_path,
             masks=record.masks,
             fps=fps,
         )
-    except CasperWeightMissingError as exc:
+    except CasperUnreachableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except CasperBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except CasperRunError as exc:
         logger.exception("casper run failed")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -62,7 +66,13 @@ async def remove_foreground() -> Response:
         logger.exception("foreground removal failed")
         raise HTTPException(status_code=500, detail="foreground removal failed")
 
-    # 新 base video のメタを取得し、SAM2 inference_state を作り直す
+    # 受け取った mp4 を一時ファイルに書き出し（init_state がパスを要求するため）
+    fd, new_video_path = tempfile.mkstemp(prefix="casper_out_", suffix=".mp4")
+    os.close(fd)
+    with open(new_video_path, "wb") as f:
+        f.write(mp4_bytes)
+
+    # 新 base video のメタ取得 + SAM2 inference_state 再構築
     try:
         new_meta = probe_video(new_video_path)
     except ValueError as exc:
@@ -91,8 +101,5 @@ async def remove_foreground() -> Response:
         num_frames=new_meta.num_frames,
     )
     mask_store.clear()
-
-    with open(new_video_path, "rb") as f:
-        mp4_bytes = f.read()
 
     return Response(content=mp4_bytes, media_type="video/mp4")

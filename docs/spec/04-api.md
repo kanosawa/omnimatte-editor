@@ -29,6 +29,7 @@
 {
   "status": "ok",
   "model_state": "loading",
+  "casper_state": "loading",
   "session_active": false
 }
 ```
@@ -36,7 +37,8 @@
 | フィールド | 型 | 説明 |
 |---|---|---|
 | `status` | string | `"ok"` 固定 |
-| `model_state` | string | `"loading"` / `"ready"` / `"failed"` |
+| `model_state` | string | SAM2 のロード状態。`"loading"` / `"ready"` / `"failed"` |
+| `casper_state` | string | Casper sidecar のロード状態。`"loading"` / `"ready"` / `"failed"` / `"unreachable"`（sidecar に接続できない） |
 | `session_active` | boolean | 現在セッションが存在するか（バックエンドは常に最大1件） |
 
 ### 用途

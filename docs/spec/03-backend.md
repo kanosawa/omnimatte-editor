@@ -2,9 +2,13 @@
 
 ## 3.1 概要
 
-FastAPI で構築する HTTP サーバ。起動時に SAM2 モデルをバックグラウンドでロードし、フロントエンドからの mp4 アップロードと BBox 付き推論リクエストを受け付ける。レスポンスは **base video にマスクを半透明＋着色合成した mp4 バイナリ**（マスク単体ではなく合成済み）。
+FastAPI で構築する HTTP サーバ。**本サーバ（SAM2 担当, `:8000`）** と **Casper Sidecar（前景削除担当, `:8001`）** の 2 プロセス構成で、両方とも起動時にモデルをプリロードする。
 
-加えて、SAM2 で得たマスクを使って base video から前景物体を削除する `/remove` エンドポイントを提供する。前景削除は `vendor/gen-omnimatte-public` の Casper（Wan2.1-1.3B）を subprocess で起動して実行する。
+本サーバは、フロントエンドからの mp4 アップロードと BBox 付き推論リクエストを受け付ける。`/segment` のレスポンスは **base video にマスクを半透明＋着色合成した mp4 バイナリ**（マスク単体ではなく合成済み）。
+
+`/remove` は SAM2 で得たマスクを使って base video から前景物体を削除する。本サーバは Casper を直接走らせず、**HTTP で sidecar の `/run` を呼ぶ**。sidecar は `vendor/gen-omnimatte-public` の Casper（Wan2.1-1.3B）を **起動時にプリロード** しているため、`/remove` の応答時間は Casper 推論時間のみで済む。
+
+sidecar は本サーバの lifespan が自動 spawn する。フロントから sidecar は見えない（[01-overview.md §1.5](01-overview.md#15-動作モード) と [02-architecture.md §2.1](02-architecture.md#21-システム構成) 参照）。
 
 参照実装: [`vendor/sam2/examples/segment_video_server.py`](../../vendor/sam2/examples/segment_video_server.py)
 
@@ -19,13 +23,13 @@ FastAPI で構築する HTTP サーバ。起動時に SAM2 モデルをバック
 [02-architecture.md](02-architecture.md#22-ディレクトリ構成) の `server/` を参照。
 
 ```
-server/
+server/                # 本サーバ
 ├── __init__.py        # 空
-├── main.py            # FastAPI 起動、ルータ登録、CORS、lifespan
-├── model.py           # SAM2 のロード状態管理 + SAM2/Casper 設定値
+├── main.py            # FastAPI 起動、ルータ登録、CORS、lifespan で SAM2 ロード + sidecar spawn
+├── model.py           # SAM2 のロード状態管理 + SAM2 / Casper 設定値
 ├── session.py         # セッションスロット（base_video_path / inference_state）+ swap_base_video
 ├── mask_store.py      # 直近 SAM2 マスクの単一スロット
-├── removal.py         # Casper（gen-omnimatte-public）の subprocess 呼び出し
+├── casper_client.py   # sidecar への HTTP クライアント（httpx）
 ├── video_io.py        # mp4 デコード、合成 mp4 エンコード、マスク → mp4 エンコード
 ├── routes/
 │   ├── __init__.py
@@ -34,6 +38,16 @@ server/
 │   ├── segment.py
 │   └── removal.py
 └── schemas.py         # Pydantic スキーマ
+
+casper_server/         # Casper sidecar
+├── __init__.py        # 空
+├── main.py            # FastAPI 起動、lifespan で Casper プリロード
+├── holder.py          # CasperHolder（loading/ready/failed）
+├── pipeline.py        # gen-omnimatte-public の load_pipeline / run_inference を absl 非依存で再実装
+└── routes/
+    ├── __init__.py
+    ├── health.py
+    └── run.py
 ```
 
 ## 3.3 設定
@@ -46,12 +60,11 @@ server/
 | `SAM2_CKPT` | `<project_root>/vendor/sam2/checkpoints/sam2.1_hiera_large.pt` | チェックポイントの絶対パス（`__file__` 起点で解決） |
 | `SAM2_DEVICE` | `cuda` | 推論デバイス |
 
-Casper（前景削除）関連は同様に `model.py` または `removal.py` の冒頭にハードコードする。
+Casper（前景削除）関連の値はハードコードで、本サーバ・sidecar の双方から `server/model.py` を import して参照する。
 
 | 定数 | 値 | 用途 |
 |---|---|---|
 | `CASPER_REPO_DIR` | `<project_root>/vendor/gen-omnimatte-public` | Casper リポジトリのルート（`__file__` 起点） |
-| `CASPER_PYTHON` | `sys.executable` | Casper 推論用の Python 実行体 |
 | `CASPER_TRANSFORMER_PATH` | `<CASPER_REPO_DIR>/models/Casper/wan2.1_fun_1.3b_casper.safetensors` | Casper の重みファイル（リポジトリの実ファイル名に合わせる） |
 | `CASPER_CONFIG_PATH` | `config/default_wan.py` | ベース config（リポジトリ相対） |
 | `CASPER_SAMPLE_SIZE` | `"288x480"` | 推論解像度（`HxW`） |
@@ -59,7 +72,16 @@ Casper（前景削除）関連は同様に `model.py` または `removal.py` の
 | `CASPER_NUM_INFERENCE_STEPS` | `1` | サンプリングステップ数 |
 | `CASPER_TEMPORAL_WINDOW_SIZE` | `21` | 一度に処理するフレーム数 |
 | `CASPER_MATTING_MODE` | `"all_fg"` | すべての前景を削除（マスク領域＝物体すべて） |
-| `CASPER_DEFAULT_PROMPT` | `"a clean background video."` | 自動生成する `prompt.json` の `bg` 値 |
+| `CASPER_DEFAULT_PROMPT` | `"a clean background video."` | sidecar に送るプロンプトの既定値 |
+
+sidecar との通信は環境変数で制御する。
+
+| 環境変数 | 既定値 | 用途 |
+|---|---|---|
+| `OMNIMATTE_CASPER_PORT` | `8001` | sidecar のリッスンポート |
+| `CASPER_SIDECAR_BASE` | `http://127.0.0.1:{OMNIMATTE_CASPER_PORT}` | 本サーバ → sidecar の HTTP ベース URL |
+| `OMNIMATTE_SPAWN_CASPER` | `1` | `0` のとき本サーバ lifespan で sidecar を spawn しない（クラウド分離・デバッグ用） |
+| `CASPER_STARTUP_TIMEOUT_SEC` | `5.0` | `/remove` で sidecar の `state="ready"` を待つ最大秒数（SAM2 と統一） |
 
 起動関連は [`run.py`](../../run.py) で扱う。
 
@@ -198,48 +220,44 @@ class MaskStore:
 - 直近 1 件のみ保持。`/segment` のたびに上書き、`/remove` 成功時 / `/session` 差し替え時にクリア。
 - 永続化はしない（メモリ常駐）。
 
-### 3.5.5 Casper Runner（`removal.py`）
+### 3.5.5 Casper Client（`casper_client.py`）
 
-`vendor/gen-omnimatte-public/inference/wan2.1_fun/predict_v2v.py` 相当の処理を、ユーザー指定の **1 シーケンス** に対して実行する subprocess アダプタ。
+`/remove` ハンドラから呼び出される、sidecar への HTTP クライアント。
 
 ```python
-async def run_foreground_removal(
+class CasperUnreachableError(Exception): ...
+class CasperBusyError(Exception): ...
+class CasperRunError(Exception): ...
+
+async def run_casper(
     base_video_path: str,
     masks: np.ndarray,           # (T, H, W) bool
     fps: float,
-) -> str:
-    """前景削除済みの mp4 ファイルパスを返す。失敗時は例外。"""
+) -> bytes:
+    """sidecar に POST /run して mp4 バイナリを返す。失敗時は例外。"""
 ```
 
 処理フロー:
 
 ```mermaid
 flowchart TB
-    A[base_video_path + masks 受領] --> B["一時シーケンスディレクトリを作成<br/>tmp/casper_run_xxx/seq/"]
-    B --> C["base_video を input_video.mp4 として配置（コピー）"]
-    B --> D["masks を mask_00.mp4 として書き出し<br/>白=前景, 黒=背景, 元解像度・元fps"]
-    B --> E["prompt.json を生成<br/>bg = CASPER_DEFAULT_PROMPT"]
-    C --> F["subprocess で predict_v2v.py を呼ぶ<br/>asyncio.to_thread でラップ"]
-    D --> F
-    E --> F
-    F --> G["save_path 配下に生成された *-fg=-1-XXXX.mp4 を取得"]
-    G --> I[出力 mp4 パスを返す]
+    A[base_video_path + masks 受領] --> B["マスクを一時 mp4 に書き出し<br/>(video_io.write_mask_mp4)"]
+    B --> C["multipart/form-data を組み立て<br/>input_video, mask, prompt, fps"]
+    C --> D["httpx.AsyncClient で<br/>POST {CASPER_SIDECAR_BASE}/run"]
+    D --> E{ステータス}
+    E -- "200" --> F[mp4 バイナリを返す]
+    E -- "503/409/500" --> G[対応する例外を送出]
+    E -- "接続失敗" --> H[CasperUnreachableError]
 ```
 
-起動方式:
-- `subprocess.run([CASPER_PYTHON, "inference/wan2.1_fun/predict_v2v.py", ...], cwd=CASPER_REPO_DIR)` で別プロセス起動。`asyncio.to_thread` でラップしてイベントループをブロックしない
-- 引数は `--config config/default_wan.py` を起点に、`--config.experiment.matting_mode=all_fg`、`--config.video_model.transformer_path=<CASPER_TRANSFORMER_PATH>`、`--config.video_model.num_inference_steps=1`、`--config.video_model.temporal_window_size=21`、`--config.data.sample_size=288x480`、`--config.data.fps=8` を CLI 経由で上書き
-- `--config.data.data_rootdir` には作成した一時ディレクトリのパスを渡す
-- `--config.experiment.run_seqs` には作成したシーケンス名を渡す
-- `--config.experiment.save_path` も一時ディレクトリ内に切る
-
-in-process 呼び出しを採用しない理由:
-- `predict_v2v.py` は `absl` の `app.run` 起動を前提とし、グローバルにモジュールを書き換える
-- Casper の依存（diffusers / videox_fun）と SAM2 の依存（hydra / iopath 等）が衝突する可能性がある
-- subprocess なら依存衝突を完全に回避でき、GPU メモリも処理ごとに解放される
+実装上の留意点:
+- HTTP クライアントは `httpx.AsyncClient`（`requirements.txt` に追加）
+- 接続タイムアウトは 5 秒、**読み取りタイムアウトは無し**（Casper 推論は数分かかり得る）
+- 一時マスク mp4 は処理後に削除する
+- sidecar 側の `409 another run is in progress` は `CasperBusyError`、`503` は `CasperUnreachableError` 系として上位に伝搬
 
 マスクの mp4 化:
-- `masks` (`bool[T, H, W]`) を `uint8 * 255` に変換し、3ch にブロードキャスト、ベース動画の解像度・fps で mp4 にエンコードする（`video_io.write_mask_mp4(masks, fps, out_path)` を新設）
+- `masks` (`bool[T, H, W]`) を `uint8 * 255` に変換し、3ch にブロードキャスト、ベース動画の解像度・fps で mp4 にエンコードする（`video_io.write_mask_mp4(masks, fps, out_path)`）
 - 全フレーム必須（SAM2 で生成しなかったフレームは全黒で埋められた状態で MaskStore に入っている）
 
 ## 3.6 動画 I/O（`video_io.py`）
@@ -316,18 +334,24 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 
 ### 3.7.3 `/remove` の処理フロー
 
-1. `wait_ready(5.0)` でモデルロード完了を待ち合わせ（SAM2 ではないが整合性のため同じ関門を使う）
+1. `model_holder.wait_ready(5.0)` で SAM2 ロード完了を待ち合わせ
 2. `SessionSlot.current()` でセッション取得（無ければ 409: `no active session`）
 3. `MaskStore.current()` でマスク取得（無ければ 409: `no segmentation result available`）
 4. マスクの `base_video_path` が現在のセッションの `base_video_path` と一致することを確認（不一致なら 409: `mask is stale`）
-5. Casper の重みファイル `CASPER_TRANSFORMER_PATH` の存在を確認（無ければ 503: `casper model not found: ...`）
-6. `run_foreground_removal(base_video_path, masks, fps)` を呼び、出力 mp4 パスを得る
-7. 新 base video の `probe_video()` でメタ情報を取得
+5. `casper_client.run_casper(base_video_path, masks, fps)` を呼び、sidecar の `POST /run` を待つ
+   - `CasperUnreachableError` → 503 `casper sidecar unreachable`
+   - `CasperBusyError` → 409 `another removal is in progress`
+   - `CasperRunError` → 500 `casper run failed: ...`
+6. レスポンスの mp4 バイナリを一時ファイルに書き出す
+7. `probe_video()` でメタ情報を取得
 8. `predictor.init_state(new_base_video_path)` で `inference_state` を再構築
-9. `SessionSlot.swap_base_video(new_base_video_path, new_meta, new_inference_state)` でベース動画を差し替え。内部で旧 base video を削除し、`MaskStore.clear()` を呼ぶ
-10. 出力 mp4 をバイナリで返す（`video/mp4`）
+9. `SessionSlot.swap_base_video(new_base_video_path, new_inference_state, ...)` でベース動画を差し替え。内部で旧 base video を削除する
+10. `MaskStore.clear()` でマスクを破棄
+11. 出力 mp4 をバイナリで返す（`video/mp4`）
 
 > **注**: 同じセッションでベース動画を差し替えるため、フロントエンドからは `/session` を呼び直さない。`/remove` レスポンスがそのまま新しい base video として扱われる。
+>
+> Casper の重みファイル不在チェックは sidecar 側のロード時に行う（不在なら sidecar の `casper_state` が `failed` になり、本サーバの `/remove` は 503 を返す）。
 
 ## 3.8 エラー処理
 
@@ -338,11 +362,13 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 | `/segment` または `/remove` 時にセッションが存在しない | 409 | `no active session` |
 | `/remove` 時に SAM2 結果が手元にない | 409 | `no segmentation result available` |
 | `/remove` 時に保持マスクが古い base video のもの | 409 | `mask is stale` |
-| `/remove` 時に Casper の重みファイル未配置 | 503 | `casper model not found: <path>` |
+| `/remove` 時に sidecar に接続できない | 503 | `casper sidecar unreachable` |
+| `/remove` 時に sidecar が他のジョブで処理中 | 409 | `another removal is in progress` |
+| `/remove` 時に sidecar の Casper モデル未準備（重み未配置含む） | 503 | sidecar の `/health` の `casper_state` が `failed` を返す（`casper not ready` / `casper failed to load: ...`） |
 | `frame_idx` が範囲外 | 422 | `frame_idx out of range: ...` |
 | `bbox` の値が不正（長さ・座標） | 422 | Pydantic バリデーション |
 | mp4 が読み込めない | 400 | `cannot open video: ...` |
-| Casper subprocess 異常終了 | 500 | `foreground removal failed: <stderr 抜粋>` |
+| sidecar 内部の Casper 推論が異常終了 | 500 | `casper run failed: <stderr 抜粋>` |
 | 内部例外 | 500 | `segmentation failed` 等 |
 
 ロード待ちのタイムアウトは 5 秒。これを超えるとフロントエンドは 503 を受け取り、エラー表示する。
@@ -351,11 +377,108 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 
 `main.py` で `CORSMiddleware` を `allow_origins=["*"]`（全許可）で登録する。サーバ自体にネットワーク・ファイアウォール等のアクセス制限をかける前提のため、CORS 側はゆるく開放する。
 
-## 3.10 実装チェックリスト
+## 3.10 Casper Sidecar 仕様（`casper_server/`）
 
-- [ ] `server/` のファイル構成が本仕様と一致
-- [ ] FastAPI 起動時に `asyncio.create_task(model_holder.load())` でロードが開始される
-- [ ] モデルロード未完了でも `/health` は応答する
+Casper（前景削除）専用の小さな FastAPI。`vendor/gen-omnimatte-public` のパイプラインを **起動時にプリロード** し、本サーバから HTTP で呼ばれる。
+
+### 3.10.1 起動方式
+
+- 本サーバ lifespan で `subprocess.Popen([sys.executable, "-m", "casper_server.main"], env=...)` で spawn される（`OMNIMATTE_SPAWN_CASPER=1` 既定）
+- 単独起動も可能: `python run_casper.py`
+- リッスンアドレス: `127.0.0.1:{OMNIMATTE_CASPER_PORT}`（既定 `8001`）。`0.0.0.0` には bind しない
+- 標準出力・標準エラーは本サーバが `[casper] ` プレフィクス付きでメインログに混ぜる
+
+### 3.10.2 CasperHolder（`casper_server/holder.py`）
+
+[`ModelHolder`](#34-モデルロードmodelpy) と同パターン。
+
+| 項目 | 内容 |
+|---|---|
+| `state` | `"loading" \| "ready" \| "failed"` |
+| `pipeline` | `WanFunInpaintPipeline`（ロード成功後） |
+| `vae`, `generator` | 同上（`load_pipeline` の戻り値を保持） |
+| `error` | ロード失敗時のメッセージ |
+| `_ready_event` | `asyncio.Event` |
+| `wait_ready(timeout)` | SAM2 と同じシグネチャ。`/run` ハンドラ冒頭で `CASPER_STARTUP_TIMEOUT_SEC` 秒待つ |
+
+lifespan で `asyncio.create_task(casper_holder.load())` で非同期ロード開始。`load()` 内では `asyncio.to_thread(self._load_sync)` で `pipeline.load_pipeline(...)` を worker thread に逃がす。
+
+重みファイル `CASPER_TRANSFORMER_PATH` 不在は `_load_sync` 冒頭でチェックし、`state="failed"` に遷移させる。
+
+### 3.10.3 Pipeline ラッパ（`casper_server/pipeline.py`）
+
+`vendor/gen-omnimatte-public/inference/wan2.1_fun/predict_v2v.py` の `load_pipeline` / `run_inference` 相当を、**`absl.app.run` / `absl.flags` から切り離した import 可能関数として再実装する**。
+
+| 関数 | 概要 |
+|---|---|
+| `build_default_config() -> ConfigDict` | `gen-omnimatte-public/config/default_wan.py` を `ml_collections` で読み、本仕様の上書き値（`matting_mode=all_fg`、`sample_size=288x480`、`fps=8`、`num_inference_steps=1`、`temporal_window_size=21`、`transformer_path=<重み>`）を当てる |
+| `load_pipeline(cfg) -> (pipeline, vae, generator)` | `predict_v2v.load_pipeline` 相当をコピー（`absl` 非依存） |
+| `run_one_seq(cfg, pipeline, vae, generator, seq_dir, save_dir) -> str` | `predict_v2v.run_inference` を 1 シーケンス向けに切り出し、出力 mp4 のパスを返す |
+
+`predict_v2v.py` はモジュールトップで `absl.flags` をグローバル登録するため **本サーバや sidecar から import しない**。必要な関数は `pipeline.py` 内に移植する。
+
+### 3.10.4 sidecar API
+
+| パス | メソッド | 概要 |
+|---|---|---|
+| `/health` | GET | sidecar 稼働確認 + Casper ロード状態 |
+| `/run` | POST (multipart) | input_video.mp4 + mask_00.mp4 + form fields → 前景削除済み mp4 |
+
+#### `/health`
+
+```json
+{
+  "status": "ok",
+  "casper_state": "loading"  // "loading" | "ready" | "failed"
+}
+```
+
+#### `/run`
+
+Request (`multipart/form-data`):
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `input_video` | mp4 binary | base video |
+| `mask` | mp4 binary | 白=前景、黒=背景の 3ch mp4。base video と同じ解像度・fps |
+| `prompt` | string | 背景プロンプト。本サーバは `CASPER_DEFAULT_PROMPT` を渡す |
+| `fps` | string | 元動画の fps（参考用。Casper 側は `cfg.data.fps` を使うので無視可） |
+
+Response (200):
+- Content-Type: `video/mp4`
+- Body: 前景削除済み mp4 バイナリ
+
+Error:
+
+| HTTP | 内容 |
+|---|---|
+| 503 | `casper not ready (timeout)` / `casper failed to load: ...` |
+| 409 | `another run is in progress`（同時実行を許さないため） |
+| 500 | `casper run failed: <stderr 抜粋>` |
+| 422 | multipart のバリデーション |
+
+### 3.10.5 同時実行制御
+
+sidecar は **同時に 1 件しか処理しない**。`/run` 内で `asyncio.Lock` を保持し、ロック取得済みの間に来た 2 件目は即 409 を返す（待たせない）。
+
+理由: GPU メモリと一貫性確保。本サーバ側は `removeState === "running"` の間に `/remove` を再発火しないため、通常のフローで衝突しないが、二重防御として sidecar 側でも弾く。
+
+### 3.10.6 sidecar クラッシュ時の扱い
+
+MVP では自動再起動しない。
+
+- spawn 失敗時はログを出して本サーバは続行（次の `/remove` で `casper sidecar unreachable` を返す）
+- 起動後にクラッシュした場合も同様
+- 復旧手順: 本サーバを再起動（lifespan で sidecar が再 spawn される）、または `python run_casper.py` を別途起動
+
+## 3.11 実装チェックリスト
+
+### 本サーバ
+- [ ] `server/` のファイル構成が本仕様と一致（旧 `server/removal.py` は削除）
+- [ ] FastAPI 起動時に `asyncio.create_task(model_holder.load())` で SAM2 ロードが開始される
+- [ ] FastAPI 起動時に `OMNIMATTE_SPAWN_CASPER=1` のとき sidecar が spawn され、shutdown で停止する
+- [ ] sidecar の標準出力・標準エラーが本サーバログに `[casper] ` プレフィクス付きで流れる
+- [ ] モデルロード未完了でも `/health` は応答し、`casper_state` も含む
 - [ ] モデルロード未完了の場合、`/session` / `/segment` / `/remove` は最大 5 秒待機して 503 を返す
 - [ ] `/session` で受け取った mp4 を一時ファイルに保存し、`init_state` を呼ぶ
 - [ ] `/session` のレスポンスは `videoMeta` のみを含む（`session_id` は返さない）
@@ -363,10 +486,25 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 - [ ] `/segment` で base video＋マスクの半透明合成 mp4 をエンコードし、`video/mp4` バイナリで返す
 - [ ] `/segment` 完了時に `MaskStore.set()` が走り、フレーム別マスクが保存される
 - [ ] `/segment` をセッション未作成で呼ぶと 409 を返す
-- [ ] `/remove` がセッションとマスクの整合性（`base_video_path` 一致）を確認したうえで Casper を subprocess で起動する
+- [ ] `/remove` がセッションとマスクの整合性（`base_video_path` 一致）を確認したうえで sidecar の `POST /run` を呼ぶ
 - [ ] `/remove` 完了時に `SessionSlot.swap_base_video()` で旧 base video が削除され、`init_state` が再構築される
 - [ ] `/remove` 完了時に `MaskStore.clear()` が呼ばれる
 - [ ] `/remove` を SAM2 結果なしで呼ぶと 409 (`no segmentation result available`) を返す
-- [ ] Casper の重みファイル（`CASPER_TRANSFORMER_PATH`）が無いとき 503 を返す
-- [ ] Casper 用の一時シーケンスディレクトリが処理後にクリーンアップされる
+- [ ] sidecar 接続失敗で `/remove` が 503 (`casper sidecar unreachable`) を返す
 - [ ] 一時ファイルがセッション差し替え時に削除される
+
+### Casper sidecar
+- [ ] `casper_server/` パッケージが追加され、`python -m casper_server.main` で起動できる
+- [ ] lifespan で `CasperHolder.load()` が非同期で走り、`/health` がロード状態を返す
+- [ ] `pipeline.py` の関数群が `absl` / `predict_v2v.py` を import せず動く
+- [ ] 重みファイル `CASPER_TRANSFORMER_PATH` 不在で `casper_state="failed"` になる
+- [ ] `/run` が `multipart/form-data` で input_video / mask / prompt / fps を受け、mp4 バイナリを返す
+- [ ] `/run` 内で `asyncio.Lock` により同時実行が 1 件に制限され、2 件目は 409 を返す
+- [ ] `/run` 失敗時に 500 / 503 / 409 を仕様どおり返す
+- [ ] sidecar 内部の一時ディレクトリが処理後にクリーンアップされる
+
+### 起動
+- [ ] `python run.py` で本サーバと sidecar の両方が立ち上がる
+- [ ] `python run_casper.py` で sidecar 単独起動できる
+- [ ] `OMNIMATTE_SPAWN_CASPER=0 python run.py` で sidecar 自動 spawn を抑止できる
+- [ ] `CASPER_SIDECAR_BASE` で sidecar URL を切り替えられる

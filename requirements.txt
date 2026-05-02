@@ -7,3 +7,30 @@ numpy
 opencv-python
 imageio-ffmpeg
 decord
+huggingface_hub
+gdown
+
+# 本サーバ ⇔ Casper sidecar HTTP
+httpx
+
+# Casper sidecar 用（gen-omnimatte-public 依存。gradio / tensorboard / albumentations
+# 等の本サーバ・sidecar API では使わない依存は意図的に除外）
+diffusers>=0.30.1
+transformers>=4.46.2
+accelerate>=0.25.0
+ml_collections
+absl-py
+omegaconf
+einops
+safetensors
+loguru
+mediapy
+imageio[ffmpeg]
+imageio[pyav]
+torchdiffeq
+torchsde
+SentencePiece
+ftfy
+func_timeout
+kornia
+timm
