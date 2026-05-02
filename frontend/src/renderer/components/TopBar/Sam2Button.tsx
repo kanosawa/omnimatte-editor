@@ -6,12 +6,14 @@ export function Sam2Button() {
   const bbox = useVideoStore((s) => s.bbox);
   const segmentState = useVideoStore((s) => s.segmentState);
   const segmentError = useVideoStore((s) => s.segmentError);
+  const removeState = useVideoStore((s) => s.removeState);
   const runSegment = useVideoStore((s) => s.runSegment);
 
   const isLoaded = videoMeta !== null;
   const isRunning = segmentState === "running";
+  const isRemoving = removeState === "running";
 
-  const enabled = isLoaded && !isPlaying && bbox !== null && !isRunning;
+  const enabled = isLoaded && !isPlaying && bbox !== null && !isRunning && !isRemoving;
 
   const label = isRunning ? "処理中…" : "SAM2 で検出";
 

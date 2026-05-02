@@ -1,16 +1,32 @@
 import asyncio
 import logging
 import os
+import sys
 from typing import Literal
 
 
 logger = logging.getLogger(__name__)
 
 _here = os.path.dirname(os.path.abspath(__file__))
-_sam2_dir = os.path.join(os.path.dirname(_here), "vendor", "sam2")
+_project_root = os.path.dirname(_here)
+_sam2_dir = os.path.join(_project_root, "vendor", "sam2")
 SAM2_CFG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 SAM2_CKPT = os.path.join(_sam2_dir, "checkpoints/sam2.1_hiera_large.pt")
 SAM2_DEVICE = "cuda"
+
+# Casper（gen-omnimatte-public）関連の設定
+CASPER_REPO_DIR = os.path.join(_project_root, "vendor", "gen-omnimatte-public")
+CASPER_PYTHON = sys.executable
+CASPER_TRANSFORMER_PATH = os.path.join(
+    CASPER_REPO_DIR, "models", "Casper", "wan2.1_fun_1.3b_casper.safetensors"
+)
+CASPER_CONFIG_PATH = "config/default_wan.py"  # CASPER_REPO_DIR からの相対
+CASPER_SAMPLE_SIZE = "288x480"
+CASPER_FPS = 8
+CASPER_NUM_INFERENCE_STEPS = 1
+CASPER_TEMPORAL_WINDOW_SIZE = 21
+CASPER_MATTING_MODE = "all_fg"
+CASPER_DEFAULT_PROMPT = "a clean background video."
 
 
 ModelState = Literal["loading", "ready", "failed"]

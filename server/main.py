@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from server.model import model_holder
-from server.routes import health, segment, session
+from server.routes import health, removal, segment, session
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -31,6 +31,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(session.router)
 app.include_router(segment.router)
+app.include_router(removal.router)
 
 
 if __name__ == "__main__":

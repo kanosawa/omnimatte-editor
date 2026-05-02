@@ -1,6 +1,6 @@
 import { create } from "zustand";
-import type { Bbox, SegmentState, VideoMeta } from "../types";
-import { segment, uploadVideo } from "../api/client";
+import type { Bbox, RemoveState, SegmentState, VideoMeta } from "../types";
+import { removeForeground, segment, uploadVideo } from "../api/client";
 
 type VideoStoreState = {
   videoMeta: VideoMeta | null;
@@ -10,6 +10,11 @@ type VideoStoreState = {
   bbox: Bbox | null;
   segmentState: SegmentState;
   segmentError: string | null;
+  // 直近の SAM2 抽出が完了済みか（合成 mp4 を表示中）。
+  // /segment 完了で true、/remove 完了 / loadVideo で false。
+  hasSegmentation: boolean;
+  removeState: RemoveState;
+  removeError: string | null;
 };
 
 type VideoStoreActions = {
@@ -22,6 +27,7 @@ type VideoStoreActions = {
   setBbox: (bbox: Bbox | null) => void;
   clearBbox: () => void;
   runSegment: () => Promise<void>;
+  runRemoveForeground: () => Promise<void>;
   reset: () => void;
 };
 
@@ -51,6 +57,9 @@ const initialState: VideoStoreState = {
   bbox: null,
   segmentState: "idle",
   segmentError: null,
+  hasSegmentation: false,
+  removeState: "idle",
+  removeError: null,
 };
 
 export const useVideoStore = create<VideoStore>((set, get) => {
@@ -115,6 +124,9 @@ export const useVideoStore = create<VideoStore>((set, get) => {
         isPlaying: false,
         segmentState: "idle",
         segmentError: null,
+        hasSegmentation: false,
+        removeState: "idle",
+        removeError: null,
       });
 
       // ローカルでまず原動画を再生
@@ -202,10 +214,51 @@ export const useVideoStore = create<VideoStore>((set, get) => {
           }, 5000);
         });
 
-        set({ segmentState: "idle" });
+        set({ segmentState: "idle", hasSegmentation: true });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         set({ segmentState: "error", segmentError: message });
+      }
+    },
+
+    runRemoveForeground: async () => {
+      const { videoMeta, hasSegmentation, segmentState, removeState } = get();
+      if (!videoMeta || !hasSegmentation) return;
+      if (segmentState === "running" || removeState === "running") return;
+
+      set({ removeState: "running", removeError: null, bbox: null });
+
+      try {
+        const blob = await removeForeground();
+
+        const restoreTime = videoElement.currentTime;
+        const wasPaused = videoElement.paused;
+
+        if (videoObjectUrl) URL.revokeObjectURL(videoObjectUrl);
+        videoObjectUrl = URL.createObjectURL(blob);
+        videoElement.src = videoObjectUrl;
+        videoElement.load();
+
+        await new Promise<void>((resolve) => {
+          const onCanPlay = () => {
+            videoElement.removeEventListener("canplay", onCanPlay);
+            try { videoElement.currentTime = restoreTime; } catch { /* ignore */ }
+            if (!wasPaused) void videoElement.play();
+            resolve();
+          };
+          videoElement.addEventListener("canplay", onCanPlay, { once: true });
+          setTimeout(() => {
+            videoElement.removeEventListener("canplay", onCanPlay);
+            resolve();
+          }, 5000);
+        });
+
+        // 前景削除後はマスクが無効化され、元の base video を更新したのと同じ扱い
+        set({ removeState: "idle", hasSegmentation: false });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        // 失敗時は表示中の合成 mp4 をそのまま維持し、再試行可能にする
+        set({ removeState: "error", removeError: message });
       }
     },
 

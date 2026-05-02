@@ -10,6 +10,7 @@ export function CanvasView() {
   const videoElement  = useVideoStore((s) => s.videoElement);
   const isPlaying     = useVideoStore((s) => s.isPlaying);
   const segmentState  = useVideoStore((s) => s.segmentState);
+  const removeState   = useVideoStore((s) => s.removeState);
   const bbox          = useVideoStore((s) => s.bbox);
   const videoMeta     = useVideoStore((s) => s.videoMeta);
 
@@ -34,9 +35,13 @@ export function CanvasView() {
 
   // BBox 操作可否
   useEffect(() => {
-    const interactive = !isPlaying && segmentState !== "running" && videoMeta != null;
+    const interactive =
+      !isPlaying &&
+      segmentState !== "running" &&
+      removeState !== "running" &&
+      videoMeta != null;
     canvasRef.current?.setBboxInteractive(interactive);
-  }, [isPlaying, segmentState, videoMeta]);
+  }, [isPlaying, segmentState, removeState, videoMeta]);
 
   // 外部からの BBox 表示同期
   useEffect(() => {

@@ -20,7 +20,8 @@ frontend/src/renderer/
 │   ├── TopBar/
 │   │   ├── TopBar.tsx
 │   │   ├── LoadVideoButton.tsx
-│   │   └── Sam2Button.tsx
+│   │   ├── Sam2Button.tsx
+│   │   └── RemoveForegroundButton.tsx
 │   ├── Canvas/
 │   │   ├── CanvasView.tsx    # React 側ラッパ
 │   │   └── VideoCanvas.ts    # Pixi 描画クラス（07-pixi-canvas.md）
@@ -46,6 +47,7 @@ flowchart TD
 
     TopBar --> LoadVideoButton
     TopBar --> Sam2Button
+    TopBar --> RemoveForegroundButton
 
     CanvasView -. instantiates .-> VideoCanvas[("VideoCanvas<br/>Pixi class")]
 
@@ -56,6 +58,7 @@ flowchart TD
     Store[("videoStore<br/>zustand + VideoElement")]:::store
     LoadVideoButton -.reads/writes.-> Store
     Sam2Button -.reads/writes.-> Store
+    RemoveForegroundButton -.reads/writes.-> Store
     CanvasView -.reads.-> Store
     VideoCanvas -.reads.-> Store
     PlaybackControls -.reads/writes.-> Store
@@ -82,6 +85,7 @@ flowchart TD
 | `TopBar.tsx` | レイアウトのみ |
 | `LoadVideoButton.tsx` | mp4 ファイル選択 → `videoStore.loadVideo(file)` を呼ぶ |
 | `Sam2Button.tsx` | BBox 有効時のみ活性化、押下で `videoStore.runSegment()` を呼ぶ |
+| `RemoveForegroundButton.tsx` | `hasSegmentation` のときだけ活性化、押下で `videoStore.runRemoveForeground()` を呼ぶ |
 
 ### CanvasView.tsx
 
@@ -120,6 +124,7 @@ flowchart TD
 // api/client.ts のおおまかなインターフェース
 export async function uploadVideo(file: File): Promise<SessionResponse>;
 export async function segment(req: SegmentRequest): Promise<Blob>;
+export async function removeForeground(): Promise<Blob>;
 ```
 
 `videoStore` のアクション内でこれらを呼び、状態を更新する。`/health` はフロントからはポーリングしない（バックエンド側でロード完了を待ち合わせるため）。

@@ -6,6 +6,7 @@ import tempfile
 import torch
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
+from server.mask_store import mask_store
 from server.model import SAM2_DEVICE, model_holder
 from server.schemas import StartSessionResponse, VideoMeta
 from server.session import session_slot
@@ -47,12 +48,14 @@ async def start_session(video: UploadFile = File(...)) -> StartSessionResponse:
 
         session = session_slot.replace(
             inference_state=inference_state,
-            video_path=tmp_path,
+            base_video_path=tmp_path,
             width=meta.width,
             height=meta.height,
             fps=meta.fps,
             num_frames=meta.num_frames,
         )
+        # 新規セッション開始時に直前のマスクは無効
+        mask_store.clear()
     except HTTPException:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)

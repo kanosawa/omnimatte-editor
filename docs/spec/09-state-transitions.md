@@ -6,8 +6,10 @@
 
 - **BBox 有効** = `videoStore.bbox !== null`
 - **動画停止中** = `videoStore.isPlaying === false`
-- **推論中** = `videoStore.segmentState === "running"`
+- **SAM2 推論中** = `videoStore.segmentState === "running"`
+- **前景削除中** = `videoStore.removeState === "running"`
 - **動画ロード済み** = `videoStore.videoMeta !== null`（バックエンドにセッションが存在することを示す）
+- **マスク保持中** = `videoStore.hasSegmentation === true`（直近 SAM2 結果がサーバ側 MaskStore に存在し、合成 mp4 を表示中）
 
 モデルロード状態はフロント側で保持しない（`/session` 呼び出し時にバックエンドが `wait_ready(5.0)` で待ち合わせる）。モデルロード未完了時は `/session` が 503 を返し、`segmentState`/`segmentError` のエラー経路で扱う。
 
@@ -58,6 +60,8 @@ stateDiagram-v2
 | `seekTo()` でシーク | BBox クリア |
 | `loadVideo()` で動画切替 | BBox クリア（他の状態も含めてリセット） |
 | `runSegment()` 開始 | BBox クリア（[9.2.3](#923-sam2-送信時の-bbox-クリア仕様)） |
+| `runRemoveForeground()` 開始 | BBox クリア。前景削除中は新規 BBox 描画も無効 |
+| `runRemoveForeground()` 完了 | `hasSegmentation = false` に戻り、合成 mp4 を破棄して新 base video を表示 |
 | Esc キー（任意機能） | BBox クリア |
 
 クリア＝`videoStore.setBbox(null)` および `VideoCanvas.clearBbox()` を両方実行する。
@@ -67,12 +71,12 @@ stateDiagram-v2
 `VideoCanvas.setBboxInteractive(enabled)` を以下条件で呼ぶ:
 
 ```
-enabled = isLoaded && !isPlaying && segmentState !== "running"
+enabled = isLoaded && !isPlaying && segmentState !== "running" && removeState !== "running"
 ```
 
-- 動画ロード済み・停止中・推論中でない: BBox を描画可能
+- 動画ロード済み・停止中・SAM2推論中でない・前景削除中でない: BBox を描画可能
 - 再生中: マウスイベント無効。表示も非表示
-- 推論中（`segmentState === "running"`）: 停止中であっても BBox 操作は無効
+- SAM2 推論中 / 前景削除中: 停止中であっても BBox 操作は無効
 - ロード前: マウスイベント無効
 
 > **注（仕様変更）**: 当初は推論中でも BBox 描画を許可する設計だったが、実装では推論完了を待ってから次の BBox を描く UX に変更している。推論が完了すると `segmentState` が `"idle"` に戻り、BBox 操作が再び可能になる。
@@ -82,7 +86,12 @@ enabled = isLoaded && !isPlaying && segmentState !== "running"
 ### 9.3.1 活性条件
 
 ```
-active = isLoaded && !isPlaying && bbox !== null && segmentState !== "running"
+Sam2Button.active =
+    isLoaded &&
+    !isPlaying &&
+    bbox !== null &&
+    segmentState !== "running" &&
+    removeState !== "running"
 ```
 
 すべての条件を満たすときのみ **活性**。それ以外は **disabled（グレーアウト）**。
@@ -93,8 +102,59 @@ active = isLoaded && !isPlaying && bbox !== null && segmentState !== "running"
 | `!isPlaying` | BBox 指定は停止中のみのため、論理的に必須 |
 | `bbox !== null` | 推論にBBoxが必要 |
 | `segmentState !== "running"` | 同時に複数の推論を開始しない |
+| `removeState !== "running"` | 前景削除中はベース動画が確定するまで SAM2 を打たせない |
 
 モデルロード未完了の場合は押下後に `/segment` が 503 を返し、`segmentState = "error"` に遷移する（活性判定の段階では区別しない）。
+
+### 9.3a RemoveForegroundButton の状態遷移
+
+#### 9.3a.1 活性条件
+
+```
+RemoveForegroundButton.active =
+    isLoaded &&
+    !isPlaying &&
+    hasSegmentation &&
+    segmentState !== "running" &&
+    removeState !== "running"
+```
+
+| 条件 | 必要理由 |
+|---|---|
+| `isLoaded` | 動画とセッションが必要 |
+| `!isPlaying` | 推論中は再生不可。停止中で揃える |
+| `hasSegmentation` | サーバ側 MaskStore に直近のマスクがある＝合成 mp4 を表示中（要件 F9） |
+| `segmentState !== "running"` | SAM2 結果待ちの間は前景削除を打てない |
+| `removeState !== "running"` | 同時に複数の前景削除を開始しない |
+
+#### 9.3a.2 押下時の動作
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant Btn as RemoveForegroundButton
+    participant Store as videoStore
+    participant API as Backend (/remove)
+
+    U->>Btn: クリック
+    Btn->>Store: runRemoveForeground()
+    Store->>Store: removeState = "running", bbox = null
+    Note over Btn: 前景削除/SAM2/BBox入力 すべて disabled
+    Store->>API: POST /remove (空ボディ)
+    API-->>Store: new base video mp4 binary
+    Store->>Store: currentTime / paused 保存
+    Store->>Store: 旧 ObjectURL revoke → new mp4 を ObjectURL 化 → videoElement.src 差し替え
+    Store->>Store: load() → canplay 待機 → currentTime / 再生状態を復元
+    Store->>Store: hasSegmentation = false, removeState = "idle"
+    Note over Btn: 活性条件再評価<br/>(hasSegmentation=false なので前景削除は disabled)<br/>(BBox 描画は再び可能)
+```
+
+#### 9.3a.3 失敗時
+
+- `removeState = "error"`、`removeError = message`
+- `videoElement.src` は変更しない（合成 mp4 のまま）
+- `hasSegmentation` も維持（再試行可能なように）
+- ユーザーへエラー表示（`RemoveForegroundButton` 横にメッセージ）
 
 ### 9.3.2 押下時の動作
 
@@ -152,21 +212,23 @@ sequenceDiagram
 | 状態 | `videoElement.src` の中身 |
 |---|---|
 | 動画未ロード | `""`（空） |
-| 原動画再生中 | `loadVideo` で生成した原動画 ObjectURL |
+| base video 再生中 | `loadVideo` で生成した原動画 ObjectURL、または `runRemoveForeground` 完了で受け取った前景削除済み mp4 ObjectURL |
 | 合成動画再生中 | `runSegment` 完了でサーバから受け取った合成 mp4 ObjectURL |
 
 ```mermaid
 stateDiagram-v2
     [*] --> Empty
-    Empty --> Original: loadVideo
-    Original --> Composite: runSegment 完了
-    Composite --> Original: loadVideo（動画切替）
+    Empty --> Base: loadVideo
+    Base --> Composite: runSegment 完了
+    Composite --> Base: runRemoveForeground 完了 (新base video)
+    Base --> Composite: 新BBox + runSegment
+    Composite --> Base: loadVideo（動画切替）
+    Base --> Base: 別の動画を loadVideo
     Composite --> Composite: 新しい BBox で再 runSegment
-    Original --> Original: 別の動画を loadVideo
 ```
 
 - `videoElement.src` を差し替えるたびに古い ObjectURL を `URL.revokeObjectURL`
-- 合成動画への切り替え時は `currentTime` と `paused` を保存し、`canplay` 後に復元する（再生位置を維持）
+- 合成動画 / 新 base video への切り替え時は `currentTime` と `paused` を保存し、`canplay` 後に復元する（再生位置を維持）
 
 ## 9.6 全体の状態遷移マップ
 
@@ -175,28 +237,29 @@ stateDiagram-v2
     direction LR
 
     state "Idle (no video)" as Idle
-    state "Loaded / Stopped / no BBox" as LSnoB
-    state "Loaded / Stopped / BBox Active" as LSwB
-    state "Loaded / Playing" as LP
-    state "Loaded / Stopped / Segmenting" as LSeg
-    state "Loaded / Stopped / BBox Active during Segmenting" as LSegB
+    state "Loaded / no Mask" as LnM
+    state "Loaded / BBox Active / no Mask" as LBnM
+    state "Loaded / Segmenting" as LSeg
+    state "Loaded / hasSegmentation (composite表示)" as LM
+    state "Loaded / hasSegmentation / BBox Active" as LMB
+    state "Loaded / Removing" as LRem
 
     [*] --> Idle
-    Idle --> LSnoB: loadVideo
-    LSnoB --> LSwB: BBox 確定
-    LSwB --> LSnoB: BBox クリア / play
-    LSnoB --> LP: play
-    LSwB --> LP: play (BBox は強制クリア)
-    LP --> LSnoB: pause
-    LSwB --> LSeg: SAM2ボタン押下
-    LSeg --> LSnoB: 推論完了 (mask 表示)
-    LSeg --> LSegB: ユーザーが新BBoxを描画
-    LSegB --> LSeg: 推論完了 (mask 表示)<br/>※ BBoxはそのまま残る
-    LSnoB --> LSnoB: stepFrame / seek
-    LSwB --> LSnoB: stepFrame / seek (BBox クリア)
-    note right of LSeg
-      推論中は SAM2ボタンは disabled。
-      新規BBox描画は可能（停止中なら）。
+    Idle --> LnM: loadVideo
+    LnM --> LBnM: BBox 確定
+    LBnM --> LSeg: SAM2ボタン押下
+    LSeg --> LM: 推論完了 (composite mp4 表示, hasSegmentation=true)
+    LM --> LMB: 新BBox 確定
+    LMB --> LSeg: SAM2 再実行
+    LM --> LRem: 前景削除ボタン押下
+    LRem --> LnM: 削除完了 (新ベース動画表示, hasSegmentation=false)
+    LRem --> LM: 削除失敗 (合成mp4のまま)
+    LM --> LnM: loadVideo (新規)
+    LnM --> LnM: stepFrame / seek
+    note right of LRem
+      前景削除中は SAM2/BBox/前景削除すべて disabled。
+      完了で base video が新動画に差し替わり、
+      再度 BBox→SAM2→前景削除 のフローが可能。
     end note
 ```
 
@@ -205,11 +268,12 @@ stateDiagram-v2
 | UI | 活性条件 |
 |---|---|
 | `LoadVideoButton` | 常時活性 |
-| `Sam2Button` | `isLoaded && !isPlaying && bbox != null && segmentState != "running"` |
+| `Sam2Button` | `isLoaded && !isPlaying && bbox != null && segmentState != "running" && removeState != "running"` |
+| `RemoveForegroundButton` | `isLoaded && !isPlaying && hasSegmentation && segmentState != "running" && removeState != "running"` |
 | `PlaybackControls.play/pause` | `isLoaded` |
 | `PlaybackControls.step` | `isLoaded && !isPlaying` |
 | `Seekbar` | `isLoaded` |
-| Pixi BBox 入力 | `isLoaded && !isPlaying && segmentState != "running"` |
+| Pixi BBox 入力 | `isLoaded && !isPlaying && segmentState != "running" && removeState != "running"` |
 
 ## 9.8 実装チェックリスト
 
@@ -221,3 +285,8 @@ stateDiagram-v2
 - [ ] 差し替え後に再生位置と再生状態が復元される
 - [ ] 推論失敗時にエラー表示が出る
 - [ ] 動画ロード前は SAM2 ボタンとシークバーが disabled
+- [ ] `RemoveForegroundButton` は `hasSegmentation` が真かつ非実行中のみ活性
+- [ ] 前景削除中は SAM2 ボタンと BBox 入力が disabled
+- [ ] 前景削除完了で `videoElement.src` が新 base video に差し替わり、`hasSegmentation = false` に戻る
+- [ ] 前景削除後の動画に対して再度 BBox 指定 → SAM2 → 前景削除のフローが回る
+- [ ] 前景削除失敗時は表示中の合成 mp4 が維持され、エラー表示が出る

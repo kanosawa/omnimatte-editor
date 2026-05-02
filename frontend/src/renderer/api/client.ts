@@ -26,6 +26,15 @@ export async function segment(req: SegmentRequest): Promise<Blob> {
   return await res.blob();
 }
 
+export async function removeForeground(): Promise<Blob> {
+  const res = await fetch(`${API_BASE}/remove`, { method: "POST" });
+  if (!res.ok) {
+    const detail = await safeReadDetail(res);
+    throw new Error(`remove failed: ${res.status} ${detail}`);
+  }
+  return await res.blob();
+}
+
 async function safeReadDetail(res: Response): Promise<string> {
   try {
     const data = await res.clone().json();

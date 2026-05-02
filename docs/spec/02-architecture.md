@@ -19,26 +19,35 @@ flowchart LR
         API[HTTP Endpoints]
         Loader["Model Loader<br/>(起動時プリロード)"]
         Pred[SAM2 Predictor]
-        Sess["Session Slot<br/>(常に最大1件)"]
-        Enc["Composite Encoder<br/>(原動画＋マスク半透明合成)"]
+        Sess["Session Slot<br/>(base_video_path / inference_state)"]
+        MStore["MaskStore<br/>(直近の per-frame masks)"]
+        Enc["Composite Encoder<br/>(base video＋マスク半透明合成)"]
+        Casper["Casper Runner<br/>(gen-omnimatte-public, subprocess)"]
         API --> Sess
         API --> Pred
         Loader --> Pred
         Pred --> Enc
+        Pred --> MStore
+        API --> Casper
+        Casper --> Sess
     end
 
     UI -- "POST /session (mp4 binary)" --> API
     API -- "video_meta" --> UI
     UI -- "POST /segment (frame_idx, bbox)" --> API
     API -- "composite mp4 binary" --> UI
+    UI -- "POST /remove (empty body)" --> API
+    API -- "foreground-removed mp4 binary" --> UI
 ```
 
 主な特徴:
 - フロントエンドは Electron アプリ。React がUI、Pixi がキャンバス描画、zustand が状態を担当
 - バックエンドは FastAPI。起動時に SAM2 モデルをプリロード
 - 通信はすべて HTTP。mp4 はリクエスト/レスポンスともにバイナリで送受
-- `/segment` のレスポンスはマスク単体ではなく、**サーバ側で原動画にマスクを半透明合成済みの mp4**。フロントは `<video>` 1 本で再生するだけになり、原動画とマスク動画の同期問題が発生しない
+- `/segment` のレスポンスはマスク単体ではなく、**サーバ側で base video にマスクを半透明合成済みの mp4**。フロントは `<video>` 1 本で再生するだけになり、原動画とマスク動画の同期問題が発生しない
+- `/remove` は SAM2 マスクで指定した前景を base video から削除した mp4 を返し、**サーバ側のセッションのベース動画も新動画に差し替える**（カスケード）
 - バックエンドは常に最大 1 件の動画セッションだけを保持する（新規 `/session` で旧セッションは自動破棄）。クライアント・サーバー間でセッション ID をやり取りしない
+- 直近の SAM2 マスクは `MaskStore` がサーバ側で保持し、`/remove` の入力に使う（フロント⇔サーバ間でマスクを往復させない）
 
 ## 2.2 ディレクトリ構成
 
@@ -53,18 +62,22 @@ omnimatte-editor/
 │   ├── __init__.py                 # 空
 │   ├── main.py                     # FastAPIエントリポイント
 │   ├── model.py                    # SAM2モデルのロード状態管理 + 設定値（ハードコード）
-│   ├── session.py                  # セッションスロット（常に最大1件）
+│   ├── session.py                  # セッションスロット（常に最大1件）。base video の差し替えも担当
+│   ├── mask_store.py               # 直近 SAM2 結果（per-frame バイナリマスク）の単一スロット
+│   ├── removal.py                  # gen-omnimatte-public を subprocess で呼ぶ前景削除ランナ
 │   ├── video_io.py                 # mp4 読み書き、マスク → mp4 エンコード
 │   ├── routes/
 │   │   ├── __init__.py
 │   │   ├── health.py
 │   │   ├── session.py
-│   │   └── segment.py
+│   │   ├── segment.py
+│   │   └── removal.py              # POST /remove
 │   └── schemas.py                  # Pydanticスキーマ
 ├── vendor/
-│   └── sam2/                       # SAM2 公式リポジトリ（依存ライブラリとして配置）
-│       └── examples/
-│           └── segment_video_server.py
+│   ├── sam2/                       # SAM2 公式リポジトリ（依存ライブラリとして配置）
+│   │   └── examples/
+│   │       └── segment_video_server.py
+│   └── gen-omnimatte-public/       # Casper（Wan2.1-1.3B）リポジトリ（git submodule）
 ├── run.py                          # 起動スクリプト（uvicorn 起動のみ）
 ├── requirements.txt                # SAM2 (-e ./vendor/sam2) を含む
 └── frontend/
@@ -157,9 +170,16 @@ sequenceDiagram
     FE->>BE: POST /segment (frame_idx, bbox)
     BE->>M: propagate_in_video(...)
     M-->>BE: mask frames
-    BE->>BE: 原動画＋マスクを合成し mp4 エンコード
+    BE->>BE: マスクを MaskStore に保存 + base video＋マスクを合成し mp4 エンコード
     BE-->>FE: composite mp4 binary
     FE->>FE: video.src を合成 mp4 に差し替え
+
+    U->>FE: 前景削除ボタン
+    FE->>BE: POST /remove (空ボディ)
+    BE->>BE: MaskStore から masks 取り出し + Casper を subprocess で起動
+    BE->>BE: 出力 mp4 で base video を差し替え + inference_state を再構築 + MaskStore.clear()
+    BE-->>FE: foreground-removed mp4 binary
+    FE->>FE: video.src を新 base video に差し替え + hasSegmentation=false
 ```
 
 詳細なリクエスト/レスポンスは [04-api.md](04-api.md) 参照。
@@ -170,12 +190,15 @@ sequenceDiagram
 |---|---|---|
 | `server/main.py` | FastAPI 起動、ルータ登録、CORS、lifespan で非同期ロード起動 | [03-backend.md](03-backend.md) |
 | `server/model.py` | SAM2 モデルのロード状態管理 + 設定値ハードコード | [03-backend.md](03-backend.md) |
-| `server/session.py` | 現在の inference_state を保持する単一スロット | [03-backend.md](03-backend.md) |
-| `server/video_io.py` | mp4 デコード、原動画＋マスクの半透明合成 mp4 エンコード | [03-backend.md](03-backend.md) |
+| `server/session.py` | 現在の `inference_state` と base video を保持する単一スロット。`swap_base_video` でベース動画差し替え | [03-backend.md](03-backend.md) |
+| `server/mask_store.py` | 直近 SAM2 マスクの単一スロット | [03-backend.md](03-backend.md) |
+| `server/removal.py` | Casper（gen-omnimatte-public）の subprocess 呼び出し | [03-backend.md](03-backend.md) |
+| `server/video_io.py` | mp4 デコード、base video＋マスクの半透明合成 mp4 エンコード、マスク → mp4 書き出し | [03-backend.md](03-backend.md) |
 | `frontend/src/renderer/store/videoStore.ts` | zustandストア + VideoElement同期 | [08-state-management.md](08-state-management.md) |
 | `frontend/src/renderer/components/Canvas/VideoCanvas.ts` | Pixi 描画ロジック | [07-pixi-canvas.md](07-pixi-canvas.md) |
 | `frontend/src/renderer/components/Canvas/CanvasView.tsx` | Pixi クラスを React コンポーネントとしてラップ | [07-pixi-canvas.md](07-pixi-canvas.md) |
 | `frontend/src/renderer/components/TopBar/Sam2Button.tsx` | SAM2 実行ボタン。BBoxの有無で活性制御 | [09-state-transitions.md](09-state-transitions.md) |
+| `frontend/src/renderer/components/TopBar/RemoveForegroundButton.tsx` | 前景削除ボタン。`hasSegmentation` で活性制御 | [09-state-transitions.md](09-state-transitions.md) |
 
 ## 2.6 実装チェックリスト
 

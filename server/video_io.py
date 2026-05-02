@@ -121,6 +121,58 @@ def composite_overlay_to_mp4(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def write_mask_mp4(
+    masks: np.ndarray,
+    fps: float,
+    out_path: str,
+) -> None:
+    """マスク (T, H, W) bool を 3ch の mp4 として書き出す。
+
+    白 (255,255,255) が前景、黒 (0,0,0) が背景。Casper（gen-omnimatte-public）
+    の `mask_*.mp4` フォーマットに合わせる。base video と同じ解像度・fps で
+    エンコードする前提。
+    """
+    if masks.ndim != 3:
+        raise ValueError(f"masks must be 3D (T, H, W), got shape {masks.shape}")
+    t, height, width = masks.shape
+    if t == 0:
+        raise ValueError("masks has zero frames")
+
+    enc_w = width + (width % 2)
+    enc_h = height + (height % 2)
+
+    tmpdir = tempfile.mkdtemp(prefix="omnimatte_mask_")
+    try:
+        for i in range(t):
+            mono = (masks[i].astype(np.uint8)) * 255
+            frame = np.stack([mono, mono, mono], axis=-1)  # (H, W, 3) BGR (gray は同値なのでOK)
+            if enc_w != width or enc_h != height:
+                frame = cv2.copyMakeBorder(
+                    frame, 0, enc_h - height, 0, enc_w - width,
+                    cv2.BORDER_CONSTANT, value=0,
+                )
+            cv2.imwrite(os.path.join(tmpdir, f"frame_{i:06d}.png"), frame)
+
+        safe_fps = max(1.0, float(fps))
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(), "-y",
+            "-framerate", str(safe_fps),
+            "-i", os.path.join(tmpdir, "frame_%06d.png"),
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-crf", "18",
+            "-preset", "fast",
+            out_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg mask encoding failed:\n{result.stderr.decode(errors='replace')}"
+            )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def _normalize_mask(mask: np.ndarray, width: int, height: int) -> np.ndarray:
     """bool / uint8 のマスクを (height, width) の bool に揃える。"""
     if mask.dtype == bool:

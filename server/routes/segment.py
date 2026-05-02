@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from fastapi import APIRouter, HTTPException, Response
 
+from server.mask_store import mask_store
 from server.model import SAM2_DEVICE, model_holder
 from server.schemas import SegmentRequest
 from server.session import session_slot
@@ -76,12 +77,21 @@ async def segment(req: SegmentRequest) -> Response:
     fps = session.fps
     try:
         mp4_bytes = composite_overlay_to_mp4(
-            original_video_path=session.video_path,
+            original_video_path=session.base_video_path,
             masks_in_order=masks_in_order,
             fps=fps,
         )
     except Exception:
         logger.exception("composite encoding failed")
         raise HTTPException(status_code=500, detail="composite encoding failed")
+
+    # /remove で同じマスクを使うため、サーバ側に保持する。
+    # base_video_path も併記して、後続の /remove が古い base に対するマスクで動かないようにする。
+    masks_array = np.stack(masks_in_order, axis=0)
+    mask_store.set(
+        masks=masks_array,
+        base_video_path=session.base_video_path,
+        fps=fps,
+    )
 
     return Response(content=mp4_bytes, media_type="video/mp4")

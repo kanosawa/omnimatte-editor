@@ -14,7 +14,8 @@
 |---|---|---|
 | `/health` | GET | 稼働確認とモデルロード状態 |
 | `/session` | POST | mp4 アップロード（multipart） |
-| `/segment` | POST | BBox を指定して原動画＋マスク半透明合成済み mp4 を取得 |
+| `/segment` | POST | BBox を指定して base video＋マスク半透明合成済み mp4 を取得 |
+| `/remove` | POST | 直近 SAM2 マスクで base video から前景削除した mp4 を取得（サーバ側でベース動画も差し替え） |
 
 ## 4.3 `/health`
 
@@ -114,7 +115,9 @@
 ### Response (200)
 
 - Content-Type: `video/mp4`
-- Body: 原動画にマスクを半透明＋着色合成済みの mp4 バイナリ（H.264 / yuv420p）
+- Body: base video にマスクを半透明＋着色合成済みの mp4 バイナリ（H.264 / yuv420p）
+
+成功時、サーバ側では `MaskStore` に直近マスクが保存される（`/remove` の入力に使う）。
 
 ### Error
 
@@ -128,9 +131,41 @@
 ### フロントエンドの取り扱い
 
 - レスポンスを `Blob`（`type: 'video/mp4'`）として受け取り、`URL.createObjectURL(blob)` で `videoElement.src` に差し替え
-- 直前の `videoElement.src`（原動画 ObjectURL or 前回の合成 mp4）は `URL.revokeObjectURL` でメモリ解放
+- 直前の `videoElement.src`（base video ObjectURL or 前回の合成 mp4）は `URL.revokeObjectURL` でメモリ解放
 - 差し替え時に `currentTime` と `paused` を保存し、`canplay` 後に復元する（再生位置を維持）
+- 完了時に `hasSegmentation = true` に更新する（`/remove` ボタンの活性条件に使う）
 - 1物体のみなので、新しい mp4 を受信したら古いものは破棄（[01-overview.md §1.2](01-overview.md#12-機能要件) F6）
+
+## 4.5b `/remove`
+
+### Request
+
+`POST /remove`
+
+- Content-Type: なし（ボディ空）
+- セッションとマスクは常にバックエンドの現在スロットを暗黙利用する
+
+### Response (200)
+
+- Content-Type: `video/mp4`
+- Body: 前景削除済みの mp4 バイナリ（H.264 / yuv420p）
+- ステータスコード 200 を返した時点で、サーバ側の base video は **新しい mp4 に差し替え済み**、`MaskStore` は **クリア済み**
+
+### Error
+
+| HTTP | 内容 |
+|---|---|
+| 409 | セッション未作成、SAM2 結果なし、または stale マスク |
+| 500 | Casper 推論失敗、エンコード失敗 |
+| 503 | モデル未準備、Casper 重み未配置 |
+
+### フロントエンドの取り扱い
+
+- レスポンスを `Blob` として受け取り、`videoElement.src` を新 base video に差し替える
+- 旧 ObjectURL は `URL.revokeObjectURL`
+- `currentTime` と `paused` を保存・復元
+- 完了時に `hasSegmentation = false` に戻し、`bbox = null` にする
+- 失敗時は `videoElement.src` を変更しない（合成 mp4 の表示を維持）
 
 ## 4.6 BBox 座標系の規約
 
@@ -146,6 +181,7 @@
 | `/health` | なし（即応答） | フロントからは現状ポーリングしない |
 | `/session` | モデル待機 5 秒 → 503 | 自動リトライしない。失敗時はユーザーにエラー表示 |
 | `/segment` | モデル待機 5 秒 → 503。推論自体には上限なし | 自動リトライしない |
+| `/remove` | モデル待機 5 秒 → 503。Casper 推論自体には上限なし（数分〜数十分） | 自動リトライしない。`fetch` にタイムアウトを設定しない |
 
 5秒は**起動直後にモデルロード未完了で来たリクエストが諦めるまでの時間**。SAM2 のロードは通常もっと時間がかかるが、起動して時間が経っているのにロードが終わっていないケースは異常とみなして早めに 503 を返す方針。
 
@@ -173,14 +209,23 @@ async function segment(req: SegmentRequest): Promise<Blob> {
   if (!res.ok) throw new Error(`segment failed: ${res.status}`);
   return res.blob();
 }
+
+// /remove
+async function removeForeground(): Promise<Blob> {
+  const res = await fetch(`${API_BASE}/remove`, { method: "POST" });
+  if (!res.ok) throw new Error(`remove failed: ${res.status}`);
+  return res.blob();
+}
 ```
 
 ## 4.9 実装チェックリスト
 
 - [ ] `/health` がモデルロード状態を返す
 - [ ] `/session` が multipart で mp4 を受け、`videoMeta` を返す（`session_id` は返さない）
-- [ ] `/segment` が原動画＋マスク半透明合成済み mp4 をバイナリで返す
+- [ ] `/segment` が base video＋マスク半透明合成済み mp4 をバイナリで返す
 - [ ] `/segment` を `/session` 未呼び出しで叩くと 409 を返す
-- [ ] フロントの `client.ts` が `/session` と `/segment` を型付きで呼ぶ
+- [ ] `/remove` が前景削除済み mp4 をバイナリで返す
+- [ ] `/remove` を SAM2 結果なしで叩くと 409 (`no segmentation result available`) を返す
+- [ ] フロントの `client.ts` が `/session` / `/segment` / `/remove` を型付きで呼ぶ
 - [ ] BBox はフロント側で動画ピクセル座標に変換してから送信される
 - [ ] エラーレスポンスがフロントエンドで分類処理されている（503は再試行、409はセッション再作成 等）

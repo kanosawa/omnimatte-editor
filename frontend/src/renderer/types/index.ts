@@ -1,4 +1,5 @@
 export type SegmentState = "idle" | "running" | "error";
+export type RemoveState = "idle" | "running" | "error";
 
 export type Bbox = {
   x1: number;

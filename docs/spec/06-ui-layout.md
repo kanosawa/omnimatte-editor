@@ -15,7 +15,7 @@ flowchart TB
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  TopBar  [読み込み] [SAM2]                           │  ← 固定高さ
+│  TopBar  [読み込み] [SAM2] [前景削除]                │  ← 固定高さ
 ├──────────────────────────────────────────────────────┤
 │                                                      │
 │                  Canvas (Pixi)                       │  ← 残りの領域
@@ -37,6 +37,7 @@ flowchart TB
 |---|---|
 | `LoadVideoButton` | mp4 を読み込むボタン |
 | `Sam2Button` | SAM2 で検出するボタン |
+| `RemoveForegroundButton` | 前景を削除するボタン（`Sam2Button` の右隣） |
 
 横並び。左寄せ・右寄せいずれでもよいが、本仕様では **左寄せ** を採用。
 
@@ -52,12 +53,23 @@ flowchart TB
 ### 6.2.3 Sam2Button
 
 - 表示: 「SAM2 で検出」 or アイコン + テキスト
-- 活性条件: BBox が有効、かつ SAM2 推論中でない、かつ動画ロード済み、かつバックエンドの `model_state === "ready"`
+- 活性条件: BBox が有効、かつ SAM2 推論中でない、**かつ前景削除中でない**、かつ動画ロード済み、かつバックエンドの `model_state === "ready"`
 - それ以外はグレーアウト（disabled）
 - 動作: クリックで `videoStore.runSegment()` を呼ぶ
 - 推論中の表示: スピナー or ボタンラベルを「処理中…」に変更（[09-state-transitions.md](09-state-transitions.md) 参照）
 
 詳細な活性条件と状態遷移は [09-state-transitions.md](09-state-transitions.md) を必読。
+
+### 6.2.4 RemoveForegroundButton
+
+- 表示: 「前景を削除」
+- 配置: `Sam2Button` の **右隣**
+- 活性条件: 動画ロード済み、停止中、`hasSegmentation === true`（合成 mp4 が表示されている）、SAM2 推論中でない、前景削除中でない
+- 動作: クリックで `videoStore.runRemoveForeground()` を呼ぶ
+- 推論中の表示: ボタンラベルを「処理中…」に変更、ボタン disabled
+- 失敗時: ボタン横にエラーメッセージ表示。base video と SAM2 結果は維持
+
+詳細は [09-state-transitions.md](09-state-transitions.md) を参照。
 
 ## 6.3 キャンバス
 
@@ -143,9 +155,10 @@ MVP では実装しなくてよい。実装するなら以下を推奨。
 ## 6.8 実装チェックリスト
 
 - [ ] 3段レイアウトが正しく描画され、ウィンドウリサイズに追従する
-- [ ] トップバーに `LoadVideoButton` と `Sam2Button` が並ぶ
+- [ ] トップバーに `LoadVideoButton` / `Sam2Button` / `RemoveForegroundButton` が並ぶ
 - [ ] `LoadVideoButton` で mp4 を選択でき、`videoStore.loadVideo()` が呼ばれる
 - [ ] `Sam2Button` の活性条件が [09-state-transitions.md](09-state-transitions.md) どおり
+- [ ] `RemoveForegroundButton` は `hasSegmentation` が真のときのみ活性
 - [ ] ボトムバーが3つのサブコンポーネントに分かれている
 - [ ] シークバーがドラッグでシークでき、ドラッグ中は再生が止まる
 - [ ] フレーム番号と時間が正しく表示される
