@@ -30,7 +30,7 @@ app.include_router(run.router)
 def main() -> None:
     import uvicorn
 
-    port = int(os.environ.get("OMNIMATTE_CASPER_PORT", "8001"))
+    port = int(os.environ.get("OMNIMATTE_CASPER_PORT", "8765"))
     uvicorn.run(
         "casper_server.main:app",
         host="127.0.0.1",

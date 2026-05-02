@@ -4,7 +4,7 @@ import uvicorn
 
 
 def main() -> None:
-    port = int(os.environ.get("OMNIMATTE_CASPER_PORT", "8001"))
+    port = int(os.environ.get("OMNIMATTE_CASPER_PORT", "8765"))
     uvicorn.run(
         "casper_server.main:app",
         host="127.0.0.1",

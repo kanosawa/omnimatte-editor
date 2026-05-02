@@ -27,7 +27,7 @@ CASPER_MATTING_MODE = "all_fg"
 CASPER_DEFAULT_PROMPT = "a clean background video."
 
 # sidecar との通信制御（環境変数でオーバーライド可）
-CASPER_PORT = int(os.environ.get("OMNIMATTE_CASPER_PORT", "8001"))
+CASPER_PORT = int(os.environ.get("OMNIMATTE_CASPER_PORT", "8765"))
 CASPER_SIDECAR_BASE = os.environ.get(
     "CASPER_SIDECAR_BASE", f"http://127.0.0.1:{CASPER_PORT}"
 )

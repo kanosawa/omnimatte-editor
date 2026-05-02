@@ -31,7 +31,7 @@ flowchart LR
         API --> CClient
     end
 
-    subgraph SIDE["Casper Sidecar (FastAPI :8001)"]
+    subgraph SIDE["Casper Sidecar (FastAPI :8765)"]
         SideAPI[/run, /health/]
         CHolder["CasperHolder<br/>(起動時プリロード)"]
         CPipe["Casper Pipeline<br/>(Wan2.1-Fun 1.3B)"]
@@ -52,7 +52,7 @@ flowchart LR
 
 主な特徴:
 - フロントエンドは Electron アプリ。React がUI、Pixi がキャンバス描画、zustand が状態を担当
-- バックエンドは **本サーバ（SAM2 担当, FastAPI :8000）** と **Casper Sidecar（前景削除担当, FastAPI :8001）** の 2 プロセス。両方とも起動時にモデルをプリロード
+- バックエンドは **本サーバ（SAM2 担当, FastAPI :8000）** と **Casper Sidecar（前景削除担当, FastAPI :8765）** の 2 プロセス。両方とも起動時にモデルをプリロード
 - フロントから sidecar は見えない。常に本サーバ 1 本を相手にする
 - 通信はすべて HTTP。mp4 はリクエスト/レスポンスともにバイナリで送受
 - `/segment` のレスポンスはマスク単体ではなく、**サーバ側で base video にマスクを半透明合成済みの mp4**。フロントは `<video>` 1 本で再生するだけになり、原動画とマスク動画の同期問題が発生しない

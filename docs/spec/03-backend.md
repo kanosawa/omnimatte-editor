@@ -2,7 +2,7 @@
 
 ## 3.1 概要
 
-FastAPI で構築する HTTP サーバ。**本サーバ（SAM2 担当, `:8000`）** と **Casper Sidecar（前景削除担当, `:8001`）** の 2 プロセス構成で、両方とも起動時にモデルをプリロードする。
+FastAPI で構築する HTTP サーバ。**本サーバ（SAM2 担当, `:8000`）** と **Casper Sidecar（前景削除担当, `:8765`）** の 2 プロセス構成で、両方とも起動時にモデルをプリロードする。
 
 本サーバは、フロントエンドからの mp4 アップロードと BBox 付き推論リクエストを受け付ける。`/segment` のレスポンスは **base video にマスクを半透明＋着色合成した mp4 バイナリ**（マスク単体ではなく合成済み）。
 
@@ -78,7 +78,7 @@ sidecar との通信は環境変数で制御する。
 
 | 環境変数 | 既定値 | 用途 |
 |---|---|---|
-| `OMNIMATTE_CASPER_PORT` | `8001` | sidecar のリッスンポート |
+| `OMNIMATTE_CASPER_PORT` | `8765` | sidecar のリッスンポート |
 | `CASPER_SIDECAR_BASE` | `http://127.0.0.1:{OMNIMATTE_CASPER_PORT}` | 本サーバ → sidecar の HTTP ベース URL |
 | `OMNIMATTE_SPAWN_CASPER` | `1` | `0` のとき本サーバ lifespan で sidecar を spawn しない（クラウド分離・デバッグ用） |
 | `CASPER_STARTUP_TIMEOUT_SEC` | `5.0` | `/remove` で sidecar の `state="ready"` を待つ最大秒数（SAM2 と統一） |
@@ -385,7 +385,7 @@ Casper（前景削除）専用の小さな FastAPI。`vendor/gen-omnimatte-publi
 
 - 本サーバ lifespan で `subprocess.Popen([sys.executable, "-m", "casper_server.main"], env=...)` で spawn される（`OMNIMATTE_SPAWN_CASPER=1` 既定）
 - 単独起動も可能: `python run_casper.py`
-- リッスンアドレス: `127.0.0.1:{OMNIMATTE_CASPER_PORT}`（既定 `8001`）。`0.0.0.0` には bind しない
+- リッスンアドレス: `127.0.0.1:{OMNIMATTE_CASPER_PORT}`（既定 `8765`）。`0.0.0.0` には bind しない
 - 標準出力・標準エラーは本サーバが `[casper] ` プレフィクス付きでメインログに混ぜる
 
 ### 3.10.2 CasperHolder（`casper_server/holder.py`）
