@@ -1,0 +1,222 @@
+# 09. 状態遷移
+
+本仕様で最も重要な節。BBox と SAM2 ボタンの活性／表示状態、および推論中の遷移を厳密に定義する。
+
+## 9.1 用語
+
+- **BBox 有効** = `videoStore.bbox !== null`
+- **動画停止中** = `videoStore.isPlaying === false`
+- **推論中** = `videoStore.segmentState === "running"`
+- **モデル準備完了** = `videoStore.modelState === "ready"`
+- **動画ロード済み** = `videoStore.videoMeta !== null`（バックエンドにセッションが存在することを示す）
+
+## 9.2 BBox の状態遷移
+
+### 9.2.1 フェーズ
+
+BBox は以下の3フェーズを取る。
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: 起動
+    Idle --> Drawing: マウスダウン<br/>(停止中のみ)
+    Drawing --> Active: マウスアップ<br/>(矩形確定)
+    Active --> Idle: 再生開始 / コマ送り / シーク / クリア
+    Drawing --> Idle: ESC / マウスがキャンバス外で release
+    Active --> Active: 矩形再ドラッグで上書き
+    Active --> Sent: SAM2 ボタン押下
+    Sent --> Idle: 推論開始時にBBox表示は維持<br/>（任意）→ Idle に戻すか、マスク受領まで残すかは下記参照
+```
+
+### 9.2.2 各フェーズの定義
+
+| フェーズ | 定義 | 表示 | `videoStore.bbox` |
+|---|---|---|---|
+| Idle | BBox なし | 描画なし | `null` |
+| Drawing | ドラッグ中（マウスダウン〜アップの間） | 動的に矩形を描く | （ローカルのみ。ストアには未反映） |
+| Active | 確定済み | 矩形を表示 | `Bbox` |
+| Sent | SAM2 へ送信済み | 表示はクリア（[9.2.3](#923-sam2-送信時の-bbox-クリア仕様) 参照） | `null` |
+
+### 9.2.3 SAM2 送信時の BBox クリア仕様
+
+> 要件: 「SAM2ボタンを押してバウンディングボックスの情報を送ったら、新たなバウンディングボックスの指定をできるようにする」
+
+これに従い、**SAM2 ボタン押下と同時に BBox をクリアする**。具体的には:
+
+- `runSegment` の最初で `bbox` を `null` にし、表示も消す
+- 直後から、ユーザーは新しい BBox を描き始められる
+- 推論中であっても新規 BBox 描画は **可能**（描いておけば、推論完了後に SAM2 ボタンを押せる）
+- ただし、推論中は SAM2 ボタンは disabled なので、新規 BBox を描いても即時実行はできない
+
+### 9.2.4 BBox を強制クリアするトリガ
+
+| トリガ | 結果 |
+|---|---|
+| `play()` / `togglePlay()` で再生開始 | BBox クリア |
+| `stepFrame(±1)` でコマ送り／戻し | BBox クリア |
+| `seekTo()` でシーク | BBox クリア |
+| `loadVideo()` で動画切替 | BBox クリア（他の状態も含めてリセット） |
+| `runSegment()` 開始 | BBox クリア（[9.2.3](#923-sam2-送信時の-bbox-クリア仕様)） |
+| Esc キー（任意機能） | BBox クリア |
+
+クリア＝`videoStore.setBbox(null)` および `VideoCanvas.clearBbox()` を両方実行する。
+
+### 9.2.5 BBox の操作可否
+
+`VideoCanvas.setBboxInteractive(enabled)` を以下条件で呼ぶ:
+
+```
+enabled = isLoaded && !isPlaying && segmentState !== "running"
+```
+
+- 動画ロード済み・停止中・推論中でない: BBox を描画可能
+- 再生中: マウスイベント無効。表示も非表示
+- 推論中（`segmentState === "running"`）: 停止中であっても BBox 操作は無効
+- ロード前: マウスイベント無効
+
+> **注（仕様変更）**: 当初は推論中でも BBox 描画を許可する設計だったが、実装では推論完了を待ってから次の BBox を描く UX に変更している。推論が完了すると `segmentState` が `"idle"` に戻り、BBox 操作が再び可能になる。
+
+## 9.3 SAM2 ボタンの状態遷移
+
+### 9.3.1 活性条件
+
+```
+active = isLoaded && modelReady && !isPlaying && bbox !== null && segmentState !== "running"
+```
+
+すべての条件を満たすときのみ **活性**。それ以外は **disabled（グレーアウト）**。
+
+| 条件 | 必要理由 |
+|---|---|
+| `isLoaded` | 動画とセッションが必要 |
+| `modelReady` | バックエンドのモデルが起動完了している必要 |
+| `!isPlaying` | BBox 指定は停止中のみのため、論理的に必須 |
+| `bbox !== null` | 推論にBBoxが必要 |
+| `segmentState !== "running"` | 同時に複数の推論を開始しない |
+
+### 9.3.2 押下時の動作
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant Btn as Sam2Button
+    participant Store as videoStore
+    participant API as Backend
+    participant Pixi as VideoCanvas
+
+    U->>Btn: クリック
+    Btn->>Store: runSegment()
+    Store->>Store: segmentState = "running"
+    Store->>Store: bbox = null（送信した値はリクエストに保持）
+    Store->>Pixi: setBboxDisplay(null)
+    Note over Btn: ボタンは disabled（推論中）
+    Note over Pixi: BBox操作は無効（segmentState=running のため）
+    Store->>API: POST /segment (frame_idx, bbox)
+    API-->>Store: mp4 binary（成功）
+    Store->>Store: maskVideoElement.src を差し替え
+    Store->>Store: segmentState = "idle"
+    Store->>Pixi: setMaskVideo(maskVideoElement)
+    Note over Btn: ボタン活性条件再評価
+```
+
+### 9.3.3 推論失敗時
+
+- `segmentState = "error"`、`segmentError = message`
+- マスク動画は変更しない（前のマスクがあれば残す。ただし[F6](01-overview.md#12-機能要件)の方針上、新しい指示が来たら破棄）
+- ユーザーへエラー表示（トースト等）
+- ユーザーが新しい BBox を描けば再試行可能
+
+### 9.3.4 推論中の表示
+
+- ボタンラベルを「処理中…」or スピナー表示
+- ボタンは `disabled`
+- キャンバス上に簡易インジケータ（任意）
+
+## 9.4 再生・シーク中の整合性
+
+| 操作 | 直前に必ず行うこと |
+|---|---|
+| `play()` | BBox クリア。マスクは保持 |
+| `pause()` | 何もしない |
+| `stepFrame()` | `pause()` を呼んでから seek。BBox クリア |
+| `seekTo()` | `pause()` を呼んでから seek（再生中なら）。BBox クリア |
+
+これにより [9.2.5](#925-bbox-の操作可否) の `enabled` 評価が常に矛盾しない。
+
+## 9.5 マスク動画のライフサイクル
+
+### 9.5.1 状態
+
+| 状態 | `maskVideoElement` | 表示 |
+|---|---|---|
+| マスクなし | `null` または `src=""` | 重畳なし |
+| マスク表示中 | mp4 が `src` に設定済み | 重畳あり |
+
+### 9.5.2 遷移
+
+```mermaid
+stateDiagram-v2
+    [*] --> NoMask
+    NoMask --> Showing: runSegment 完了
+    Showing --> NoMask: loadVideo（動画切替）
+    Showing --> Showing: 新しいマスク受領で差し替え
+```
+
+- 新しいマスクで上書きする際は、必ず古い ObjectURL を `URL.revokeObjectURL`
+- 動画切替（`loadVideo`）では即時 `null` にしてリソース解放
+
+## 9.6 全体の状態遷移マップ
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    state "Boot (modelState=loading)" as Boot
+    state "Idle (no video)" as Idle
+    state "Loaded / Stopped / no BBox" as LSnoB
+    state "Loaded / Stopped / BBox Active" as LSwB
+    state "Loaded / Playing" as LP
+    state "Loaded / Stopped / Segmenting" as LSeg
+    state "Loaded / Stopped / BBox Active during Segmenting" as LSegB
+
+    [*] --> Boot
+    Boot --> Idle: model ready (poll /health)
+    Idle --> LSnoB: loadVideo
+    LSnoB --> LSwB: BBox 確定
+    LSwB --> LSnoB: BBox クリア / play
+    LSnoB --> LP: play
+    LSwB --> LP: play (BBox は強制クリア)
+    LP --> LSnoB: pause
+    LSwB --> LSeg: SAM2ボタン押下
+    LSeg --> LSnoB: 推論完了 (mask 表示)
+    LSeg --> LSegB: ユーザーが新BBoxを描画
+    LSegB --> LSeg: 推論完了 (mask 表示)<br/>※ BBoxはそのまま残る
+    LSnoB --> LSnoB: stepFrame / seek
+    LSwB --> LSnoB: stepFrame / seek (BBox クリア)
+    note right of LSeg
+      推論中は SAM2ボタンは disabled。
+      新規BBox描画は可能（停止中なら）。
+    end note
+```
+
+## 9.7 SAM2ボタンと UI 要素の活性表
+
+| UI | 活性条件 |
+|---|---|
+| `LoadVideoButton` | 常時活性 |
+| `Sam2Button` | `isLoaded && modelReady && !isPlaying && bbox != null && segmentState != "running"` |
+| `PlaybackControls.play/pause` | `isLoaded` |
+| `PlaybackControls.step` | `isLoaded && !isPlaying` |
+| `Seekbar` | `isLoaded` |
+| Pixi BBox 入力 | `isLoaded && !isPlaying && segmentState != "running"` |
+
+## 9.8 実装チェックリスト
+
+- [ ] BBox は再生開始・コマ送り・シーク・動画切替で必ずクリアされる
+- [ ] SAM2 ボタンの活性条件が [9.3.1](#931-活性条件) のとおりに実装されている
+- [ ] SAM2 ボタン押下と同時に BBox がクリアされ、推論中も新規 BBox を描ける
+- [ ] 推論中は SAM2 ボタンが disabled
+- [ ] 推論完了でマスク動画が差し替わり、古い ObjectURL が revoke される
+- [ ] 推論失敗時にエラー表示が出る
+- [ ] 動画ロード前は SAM2 ボタンとシークバーが disabled
+- [ ] モデル未ロード時は SAM2 ボタンが disabled（または "loading…" 表示）

@@ -1,0 +1,231 @@
+import { create } from "zustand";
+import type { Bbox, SegmentState, VideoMeta } from "../types";
+import { segment, uploadVideo } from "../api/client";
+
+type VideoStoreState = {
+  videoMeta: VideoMeta | null;
+  videoElement: HTMLVideoElement | null;
+  isPlaying: boolean;
+  currentFrame: number;
+  bbox: Bbox | null;
+  segmentState: SegmentState;
+  segmentError: string | null;
+};
+
+type VideoStoreActions = {
+  loadVideo: (file: File) => Promise<void>;
+  togglePlay: () => void;
+  play: () => void;
+  pause: () => void;
+  stepFrame: (delta: number) => void;
+  seekTo: (frameIdx: number) => void;
+  setBbox: (bbox: Bbox | null) => void;
+  clearBbox: () => void;
+  runSegment: () => Promise<void>;
+  reset: () => void;
+};
+
+type VideoStore = VideoStoreState & VideoStoreActions;
+
+function createVideoElement(): HTMLVideoElement {
+  const v = document.createElement("video");
+  v.crossOrigin = "anonymous";
+  v.muted = true;
+  v.playsInline = true;
+  v.preload = "auto";
+  return v;
+}
+
+const videoElement = createVideoElement();
+
+// videoElement.src は loadVideo 直後は原動画、SAM2 実行後は backend がオーバーレイ合成した動画。
+// 「原動画 vs マスク」の二本立てではなく、常に「画面に出すべき動画」を1本だけ持つ。
+let videoObjectUrl: string | null = null;
+let videoFrameCallbackId: number | null = null;
+
+const initialState: VideoStoreState = {
+  videoMeta: null,
+  videoElement,
+  isPlaying: false,
+  currentFrame: 0,
+  bbox: null,
+  segmentState: "idle",
+  segmentError: null,
+};
+
+export const useVideoStore = create<VideoStore>((set, get) => {
+  const onPlay = () => set({ isPlaying: true, bbox: null });
+  const onPause = () => set({ isPlaying: false });
+  const onEnded = () => set({ isPlaying: false });
+  const onLoadedMetadata = () => {
+    const meta = get().videoMeta;
+    if (!meta) return;
+    set({
+      videoMeta: {
+        ...meta,
+        width: videoElement.videoWidth || meta.width,
+        height: videoElement.videoHeight || meta.height,
+      },
+    });
+  };
+
+  const updateCurrentFrame = () => {
+    const meta = get().videoMeta;
+    if (!meta || meta.fps <= 0) return;
+    const frame = Math.min(meta.numFrames - 1, Math.max(0, Math.round(videoElement.currentTime * meta.fps)));
+    if (frame !== get().currentFrame) set({ currentFrame: frame });
+  };
+
+  const onTimeUpdate = () => updateCurrentFrame();
+
+  const startVideoFrameCallbackLoop = () => {
+    type VFCEnabledVideoElement = HTMLVideoElement & {
+      requestVideoFrameCallback?: (cb: () => void) => number;
+    };
+    const v = videoElement as VFCEnabledVideoElement;
+    if (typeof v.requestVideoFrameCallback !== "function") return;
+    const tick = () => {
+      updateCurrentFrame();
+      videoFrameCallbackId = v.requestVideoFrameCallback!(tick);
+    };
+    videoFrameCallbackId = v.requestVideoFrameCallback(tick);
+  };
+
+  videoElement.addEventListener("play", onPlay);
+  videoElement.addEventListener("pause", onPause);
+  videoElement.addEventListener("ended", onEnded);
+  videoElement.addEventListener("loadedmetadata", onLoadedMetadata);
+  videoElement.addEventListener("timeupdate", onTimeUpdate);
+  startVideoFrameCallbackLoop();
+
+  return {
+    ...initialState,
+
+    loadVideo: async (file: File) => {
+      // 旧 URL を破棄
+      if (videoObjectUrl) {
+        URL.revokeObjectURL(videoObjectUrl);
+        videoObjectUrl = null;
+      }
+
+      set({
+        videoMeta: null,
+        bbox: null,
+        currentFrame: 0,
+        isPlaying: false,
+        segmentState: "idle",
+        segmentError: null,
+      });
+
+      // ローカルでまず原動画を再生
+      videoObjectUrl = URL.createObjectURL(file);
+      videoElement.src = videoObjectUrl;
+      videoElement.load();
+
+      // バックエンドへアップロード
+      const res = await uploadVideo(file);
+      set({ videoMeta: res.videoMeta });
+    },
+
+    togglePlay: () => {
+      if (videoElement.paused) get().play();
+      else get().pause();
+    },
+
+    play: () => {
+      const meta = get().videoMeta;
+      if (!meta) return;
+      set({ bbox: null });
+      void videoElement.play();
+    },
+
+    pause: () => {
+      videoElement.pause();
+    },
+
+    stepFrame: (delta: number) => {
+      const meta = get().videoMeta;
+      if (!meta || meta.fps <= 0) return;
+      videoElement.pause();
+      const next = Math.min(meta.numFrames - 1, Math.max(0, get().currentFrame + delta));
+      videoElement.currentTime = next / meta.fps;
+      set({ currentFrame: next, bbox: null, isPlaying: false });
+    },
+
+    seekTo: (frameIdx: number) => {
+      const meta = get().videoMeta;
+      if (!meta || meta.fps <= 0) return;
+      videoElement.pause();
+      const next = Math.min(meta.numFrames - 1, Math.max(0, frameIdx));
+      videoElement.currentTime = next / meta.fps;
+      set({ currentFrame: next, bbox: null, isPlaying: false });
+    },
+
+    setBbox: (bbox) => set({ bbox }),
+    clearBbox: () => set({ bbox: null }),
+
+    runSegment: async () => {
+      const { videoMeta, bbox, currentFrame, segmentState } = get();
+      if (!videoMeta || !bbox || segmentState === "running") return;
+
+      const sentBbox: [number, number, number, number] = [bbox.x1, bbox.y1, bbox.x2, bbox.y2];
+      set({ segmentState: "running", segmentError: null, bbox: null });
+
+      try {
+        const blob = await segment({
+          frame_idx: currentFrame,
+          bbox: sentBbox,
+        });
+
+        // 再生位置と再生状態を保存して、合成動画に差し替え後に復元する
+        const restoreTime = videoElement.currentTime;
+        const wasPaused = videoElement.paused;
+
+        if (videoObjectUrl) URL.revokeObjectURL(videoObjectUrl);
+        videoObjectUrl = URL.createObjectURL(blob);
+        videoElement.src = videoObjectUrl;
+        videoElement.load();
+
+        // canplay を待ってから再生位置を復元する
+        await new Promise<void>((resolve) => {
+          const onCanPlay = () => {
+            videoElement.removeEventListener("canplay", onCanPlay);
+            try { videoElement.currentTime = restoreTime; } catch { /* ignore */ }
+            if (!wasPaused) void videoElement.play();
+            resolve();
+          };
+          videoElement.addEventListener("canplay", onCanPlay, { once: true });
+          // フォールバック: 5 秒経っても canplay が来なければ resolve
+          setTimeout(() => {
+            videoElement.removeEventListener("canplay", onCanPlay);
+            resolve();
+          }, 5000);
+        });
+
+        set({ segmentState: "idle" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        set({ segmentState: "error", segmentError: message });
+      }
+    },
+
+    reset: () => {
+      videoElement.pause();
+      videoElement.removeAttribute("src");
+      videoElement.load();
+      if (videoObjectUrl) {
+        URL.revokeObjectURL(videoObjectUrl);
+        videoObjectUrl = null;
+      }
+      if (videoFrameCallbackId !== null) {
+        type VFCEnabledVideoElement = HTMLVideoElement & {
+          cancelVideoFrameCallback?: (id: number) => void;
+        };
+        const v = videoElement as VFCEnabledVideoElement;
+        v.cancelVideoFrameCallback?.(videoFrameCallbackId);
+        videoFrameCallbackId = null;
+      }
+      set({ ...initialState, videoElement });
+    },
+  };
+});

@@ -1,0 +1,9 @@
+-e ./vendor/sam2
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+numpy
+opencv-python
+imageio-ffmpeg
+decord
