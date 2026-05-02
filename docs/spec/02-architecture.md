@@ -20,7 +20,7 @@ flowchart LR
         Loader["Model Loader<br/>(起動時プリロード)"]
         Pred[SAM2 Predictor]
         Sess["Session Slot<br/>(常に最大1件)"]
-        Enc[Mask → mp4 Encoder]
+        Enc["Composite Encoder<br/>(原動画＋マスク半透明合成)"]
         API --> Sess
         API --> Pred
         Loader --> Pred
@@ -30,13 +30,14 @@ flowchart LR
     UI -- "POST /session (mp4 binary)" --> API
     API -- "video_meta" --> UI
     UI -- "POST /segment (frame_idx, bbox)" --> API
-    API -- "mask mp4 binary" --> UI
+    API -- "composite mp4 binary" --> UI
 ```
 
 主な特徴:
 - フロントエンドは Electron アプリ。React がUI、Pixi がキャンバス描画、zustand が状態を担当
 - バックエンドは FastAPI。起動時に SAM2 モデルをプリロード
 - 通信はすべて HTTP。mp4 はリクエスト/レスポンスともにバイナリで送受
+- `/segment` のレスポンスはマスク単体ではなく、**サーバ側で原動画にマスクを半透明合成済みの mp4**。フロントは `<video>` 1 本で再生するだけになり、原動画とマスク動画の同期問題が発生しない
 - バックエンドは常に最大 1 件の動画セッションだけを保持する（新規 `/session` で旧セッションは自動破棄）。クライアント・サーバー間でセッション ID をやり取りしない
 
 ## 2.2 ディレクトリ構成
@@ -156,9 +157,9 @@ sequenceDiagram
     FE->>BE: POST /segment (frame_idx, bbox)
     BE->>M: propagate_in_video(...)
     M-->>BE: mask frames
-    BE->>BE: マスク → mp4 エンコード
-    BE-->>FE: mask mp4 binary
-    FE->>FE: 重畳表示開始
+    BE->>BE: 原動画＋マスクを合成し mp4 エンコード
+    BE-->>FE: composite mp4 binary
+    FE->>FE: video.src を合成 mp4 に差し替え
 ```
 
 詳細なリクエスト/レスポンスは [04-api.md](04-api.md) 参照。
@@ -170,7 +171,7 @@ sequenceDiagram
 | `server/main.py` | FastAPI 起動、ルータ登録、CORS、lifespan で非同期ロード起動 | [03-backend.md](03-backend.md) |
 | `server/model.py` | SAM2 モデルのロード状態管理 + 設定値ハードコード | [03-backend.md](03-backend.md) |
 | `server/session.py` | 現在の inference_state を保持する単一スロット | [03-backend.md](03-backend.md) |
-| `server/video_io.py` | mp4 デコード、マスク → mp4 エンコード | [03-backend.md](03-backend.md) |
+| `server/video_io.py` | mp4 デコード、原動画＋マスクの半透明合成 mp4 エンコード | [03-backend.md](03-backend.md) |
 | `frontend/src/renderer/store/videoStore.ts` | zustandストア + VideoElement同期 | [08-state-management.md](08-state-management.md) |
 | `frontend/src/renderer/components/Canvas/VideoCanvas.ts` | Pixi 描画ロジック | [07-pixi-canvas.md](07-pixi-canvas.md) |
 | `frontend/src/renderer/components/Canvas/CanvasView.tsx` | Pixi クラスを React コンポーネントとしてラップ | [07-pixi-canvas.md](07-pixi-canvas.md) |
@@ -182,4 +183,4 @@ sequenceDiagram
 - [ ] バックエンドは project root から `python run.py` または `uvicorn server.main:app` で起動できる
 - [ ] フロントエンドは `npm run dev` で Electron ウィンドウが開く
 - [ ] `VITE_API_BASE` でローカル/クラウドが切り替えられる
-- [ ] フロントエンドからバックエンドの `/health` を呼んで疎通確認できる
+- [ ] `OMNIMATTE_PORT` 環境変数でバックエンドのリッスンポートが切り替えられる

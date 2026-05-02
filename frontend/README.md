@@ -23,8 +23,9 @@ Electron ウィンドウが開き、Vite の HMR が有効。
 
 ```
 VITE_API_BASE=http://localhost:8000
-VITE_HEALTH_POLL_INTERVAL_MS=1000
 ```
+
+未設定なら `http://localhost:8000` が使われる。GPU サーバを SSH ポート転送で `localhost:8000` に張る運用なら設定不要。
 
 ## ビルド
 

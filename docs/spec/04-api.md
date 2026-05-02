@@ -14,7 +14,7 @@
 |---|---|---|
 | `/health` | GET | 稼働確認とモデルロード状態 |
 | `/session` | POST | mp4 アップロード（multipart） |
-| `/segment` | POST | BBox を指定してマスク mp4 を取得 |
+| `/segment` | POST | BBox を指定して原動画＋マスク半透明合成済み mp4 を取得 |
 
 ## 4.3 `/health`
 
@@ -40,8 +40,8 @@
 
 ### 用途
 
-- 起動直後のフロントエンドが、モデルロード完了を待つためのポーリング先
-- フロントエンドは `/session` 呼び出し前に `model_state === "ready"` を確認することを推奨
+- バックエンド側でも参照可能な外形監視用エンドポイント
+- フロントエンド本体はポーリングしない（`/session` 呼び出し時にバックエンドが `wait_ready(5.0)` でロード完了を待ち合わせるため）
 
 ## 4.4 `/session`
 
@@ -114,7 +114,7 @@
 ### Response (200)
 
 - Content-Type: `video/mp4`
-- Body: マスク mp4 のバイナリ（H.264）
+- Body: 原動画にマスクを半透明＋着色合成済みの mp4 バイナリ（H.264 / yuv420p）
 
 ### Error
 
@@ -127,8 +127,9 @@
 
 ### フロントエンドの取り扱い
 
-- レスポンスを `Blob`（`type: 'video/mp4'`）として受け取り、`URL.createObjectURL(blob)` で VideoElement の `src` に設定
-- 前回のマスク URL は `URL.revokeObjectURL` でメモリ解放
+- レスポンスを `Blob`（`type: 'video/mp4'`）として受け取り、`URL.createObjectURL(blob)` で `videoElement.src` に差し替え
+- 直前の `videoElement.src`（原動画 ObjectURL or 前回の合成 mp4）は `URL.revokeObjectURL` でメモリ解放
+- 差し替え時に `currentTime` と `paused` を保存し、`canplay` 後に復元する（再生位置を維持）
 - 1物体のみなので、新しい mp4 を受信したら古いものは破棄（[01-overview.md §1.2](01-overview.md#12-機能要件) F6）
 
 ## 4.6 BBox 座標系の規約
@@ -142,7 +143,7 @@
 
 | 操作 | バックエンド側タイムアウト | フロント側のリトライ |
 |---|---|---|
-| `/health` | なし（即応答） | 数秒間隔でポーリング |
+| `/health` | なし（即応答） | フロントからは現状ポーリングしない |
 | `/session` | モデル待機 5 秒 → 503 | 自動リトライしない。失敗時はユーザーにエラー表示 |
 | `/segment` | モデル待機 5 秒 → 503。推論自体には上限なし | 自動リトライしない |
 
@@ -178,8 +179,8 @@ async function segment(req: SegmentRequest): Promise<Blob> {
 
 - [ ] `/health` がモデルロード状態を返す
 - [ ] `/session` が multipart で mp4 を受け、`videoMeta` を返す（`session_id` は返さない）
-- [ ] `/segment` がマスク mp4 をバイナリで返す
+- [ ] `/segment` が原動画＋マスク半透明合成済み mp4 をバイナリで返す
 - [ ] `/segment` を `/session` 未呼び出しで叩くと 409 を返す
-- [ ] フロントの `client.ts` が3つのエンドポイントを型付きで呼ぶ
+- [ ] フロントの `client.ts` が `/session` と `/segment` を型付きで呼ぶ
 - [ ] BBox はフロント側で動画ピクセル座標に変換してから送信される
 - [ ] エラーレスポンスがフロントエンドで分類処理されている（503は再試行、409はセッション再作成 等）

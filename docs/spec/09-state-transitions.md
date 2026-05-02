@@ -7,8 +7,9 @@
 - **BBox 有効** = `videoStore.bbox !== null`
 - **動画停止中** = `videoStore.isPlaying === false`
 - **推論中** = `videoStore.segmentState === "running"`
-- **モデル準備完了** = `videoStore.modelState === "ready"`
 - **動画ロード済み** = `videoStore.videoMeta !== null`（バックエンドにセッションが存在することを示す）
+
+モデルロード状態はフロント側で保持しない（`/session` 呼び出し時にバックエンドが `wait_ready(5.0)` で待ち合わせる）。モデルロード未完了時は `/session` が 503 を返し、`segmentState`/`segmentError` のエラー経路で扱う。
 
 ## 9.2 BBox の状態遷移
 
@@ -81,7 +82,7 @@ enabled = isLoaded && !isPlaying && segmentState !== "running"
 ### 9.3.1 活性条件
 
 ```
-active = isLoaded && modelReady && !isPlaying && bbox !== null && segmentState !== "running"
+active = isLoaded && !isPlaying && bbox !== null && segmentState !== "running"
 ```
 
 すべての条件を満たすときのみ **活性**。それ以外は **disabled（グレーアウト）**。
@@ -89,10 +90,11 @@ active = isLoaded && modelReady && !isPlaying && bbox !== null && segmentState !
 | 条件 | 必要理由 |
 |---|---|
 | `isLoaded` | 動画とセッションが必要 |
-| `modelReady` | バックエンドのモデルが起動完了している必要 |
 | `!isPlaying` | BBox 指定は停止中のみのため、論理的に必須 |
 | `bbox !== null` | 推論にBBoxが必要 |
 | `segmentState !== "running"` | 同時に複数の推論を開始しない |
+
+モデルロード未完了の場合は押下後に `/segment` が 503 を返し、`segmentState = "error"` に遷移する（活性判定の段階では区別しない）。
 
 ### 9.3.2 押下時の動作
 
@@ -112,18 +114,18 @@ sequenceDiagram
     Note over Btn: ボタンは disabled（推論中）
     Note over Pixi: BBox操作は無効（segmentState=running のため）
     Store->>API: POST /segment (frame_idx, bbox)
-    API-->>Store: mp4 binary（成功）
-    Store->>Store: maskVideoElement.src を差し替え
+    API-->>Store: composite mp4 binary（成功）
+    Store->>Store: 旧 ObjectURL を revoke、合成 mp4 を ObjectURL 化して videoElement.src に差し替え
+    Store->>Store: canplay 待機後に currentTime と再生状態を復元
     Store->>Store: segmentState = "idle"
-    Store->>Pixi: setMaskVideo(maskVideoElement)
     Note over Btn: ボタン活性条件再評価
 ```
 
 ### 9.3.3 推論失敗時
 
 - `segmentState = "error"`、`segmentError = message`
-- マスク動画は変更しない（前のマスクがあれば残す。ただし[F6](01-overview.md#12-機能要件)の方針上、新しい指示が来たら破棄）
-- ユーザーへエラー表示（トースト等）
+- 表示中の動画は変更しない（前回成功した合成動画があればそのまま継続表示）
+- ユーザーへエラー表示（`Sam2Button` 横にメッセージ）
 - ユーザーが新しい BBox を描けば再試行可能
 
 ### 9.3.4 推論中の表示
@@ -143,27 +145,28 @@ sequenceDiagram
 
 これにより [9.2.5](#925-bbox-の操作可否) の `enabled` 評価が常に矛盾しない。
 
-## 9.5 マスク動画のライフサイクル
+## 9.5 動画ソース（`videoElement.src`）のライフサイクル
 
-### 9.5.1 状態
+`videoElement` は使い回し、`src`（ObjectURL）だけが状態に応じて差し替わる。
 
-| 状態 | `maskVideoElement` | 表示 |
-|---|---|---|
-| マスクなし | `null` または `src=""` | 重畳なし |
-| マスク表示中 | mp4 が `src` に設定済み | 重畳あり |
-
-### 9.5.2 遷移
+| 状態 | `videoElement.src` の中身 |
+|---|---|
+| 動画未ロード | `""`（空） |
+| 原動画再生中 | `loadVideo` で生成した原動画 ObjectURL |
+| 合成動画再生中 | `runSegment` 完了でサーバから受け取った合成 mp4 ObjectURL |
 
 ```mermaid
 stateDiagram-v2
-    [*] --> NoMask
-    NoMask --> Showing: runSegment 完了
-    Showing --> NoMask: loadVideo（動画切替）
-    Showing --> Showing: 新しいマスク受領で差し替え
+    [*] --> Empty
+    Empty --> Original: loadVideo
+    Original --> Composite: runSegment 完了
+    Composite --> Original: loadVideo（動画切替）
+    Composite --> Composite: 新しい BBox で再 runSegment
+    Original --> Original: 別の動画を loadVideo
 ```
 
-- 新しいマスクで上書きする際は、必ず古い ObjectURL を `URL.revokeObjectURL`
-- 動画切替（`loadVideo`）では即時 `null` にしてリソース解放
+- `videoElement.src` を差し替えるたびに古い ObjectURL を `URL.revokeObjectURL`
+- 合成動画への切り替え時は `currentTime` と `paused` を保存し、`canplay` 後に復元する（再生位置を維持）
 
 ## 9.6 全体の状態遷移マップ
 
@@ -171,7 +174,6 @@ stateDiagram-v2
 stateDiagram-v2
     direction LR
 
-    state "Boot (modelState=loading)" as Boot
     state "Idle (no video)" as Idle
     state "Loaded / Stopped / no BBox" as LSnoB
     state "Loaded / Stopped / BBox Active" as LSwB
@@ -179,8 +181,7 @@ stateDiagram-v2
     state "Loaded / Stopped / Segmenting" as LSeg
     state "Loaded / Stopped / BBox Active during Segmenting" as LSegB
 
-    [*] --> Boot
-    Boot --> Idle: model ready (poll /health)
+    [*] --> Idle
     Idle --> LSnoB: loadVideo
     LSnoB --> LSwB: BBox 確定
     LSwB --> LSnoB: BBox クリア / play
@@ -204,7 +205,7 @@ stateDiagram-v2
 | UI | 活性条件 |
 |---|---|
 | `LoadVideoButton` | 常時活性 |
-| `Sam2Button` | `isLoaded && modelReady && !isPlaying && bbox != null && segmentState != "running"` |
+| `Sam2Button` | `isLoaded && !isPlaying && bbox != null && segmentState != "running"` |
 | `PlaybackControls.play/pause` | `isLoaded` |
 | `PlaybackControls.step` | `isLoaded && !isPlaying` |
 | `Seekbar` | `isLoaded` |
@@ -216,7 +217,7 @@ stateDiagram-v2
 - [ ] SAM2 ボタンの活性条件が [9.3.1](#931-活性条件) のとおりに実装されている
 - [ ] SAM2 ボタン押下と同時に BBox がクリアされ、推論中も新規 BBox を描ける
 - [ ] 推論中は SAM2 ボタンが disabled
-- [ ] 推論完了でマスク動画が差し替わり、古い ObjectURL が revoke される
+- [ ] 推論完了で `videoElement.src` が合成動画に差し替わり、古い ObjectURL が revoke される
+- [ ] 差し替え後に再生位置と再生状態が復元される
 - [ ] 推論失敗時にエラー表示が出る
 - [ ] 動画ロード前は SAM2 ボタンとシークバーが disabled
-- [ ] モデル未ロード時は SAM2 ボタンが disabled（または "loading…" 表示）

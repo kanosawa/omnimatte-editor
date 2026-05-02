@@ -14,14 +14,14 @@
 このファイルに以下が共存する:
 
 1. zustand ストアの create
-2. 内部で生成・管理する `<video>` 要素（原動画用、マスク動画用）
-3. 状態 ⇔ VideoElement の同期ロジック（イベントリスナの登録・解除）
+2. 内部で生成・管理する `<video>` 要素 1 つ（モジュールスコープ変数）
+3. 状態 ⇔ VideoElement の同期ロジック（イベントリスナの登録）
 4. API 呼び出しを発火するアクション
+5. 現在の `videoElement.src` を保持する ObjectURL のモジュールスコープ変数（差し替え時に revoke するため）
 
 ## 8.3 状態の構造
 
 ```ts
-type ModelState = "unknown" | "loading" | "ready" | "failed";
 type SegmentState = "idle" | "running" | "error";
 
 type Bbox = { x1: number; y1: number; x2: number; y2: number };  // 動画ピクセル座標
@@ -35,22 +35,15 @@ type VideoMeta = {
 };
 
 type VideoStoreState = {
-  // バックエンド
-  modelState: ModelState;
-
   // 動画メタ情報（バックエンドからの返却 + フロントの実 video から）
   // videoMeta !== null が「バックエンドにセッションが存在する」フラグも兼ねる。
   // バックエンドは常に最大1件のセッションだけを保持し、session_id は持たない。
   videoMeta: VideoMeta | null;
 
-  // VideoElement（直接の参照は store 内のみ。React からは getter 経由）
-  videoElement: HTMLVideoElement | null;       // 原動画
-  maskVideoElement: HTMLVideoElement | null;   // マスク動画（常に同じ要素参照、src だけ差し替える）
-
-  // マスク動画の現在の src（blob URL または null）
-  // maskVideoElement は参照が変わらないため、React effect の依存として使えない。
-  // src 変化を追跡する専用フィールドとして保持する。
-  maskVideoSrc: string | null;
+  // VideoElement（同じ要素参照を使い回す。src だけ差し替える）
+  // 原動画読み込み時 → 原動画 ObjectURL
+  // SAM2 実行後   → サーバが返した合成済み mp4 の ObjectURL
+  videoElement: HTMLVideoElement | null;
 
   // 再生状態
   isPlaying: boolean;
@@ -65,14 +58,12 @@ type VideoStoreState = {
 };
 ```
 
+`/health` のポーリングおよび `modelState` の保持はフロントでは行わない（`/session` 呼び出し時にバックエンド側で `wait_ready(5.0)` がブロックするため。[03-backend.md §3.4.4](03-backend.md#344-リクエスト処理時のロード待ち合わせ)）。
+
 ## 8.4 アクション
 
 ```ts
 type VideoStoreActions = {
-  // 起動時（App マウント時に呼ぶ）
-  startHealthPolling: () => void;         // /health を一定間隔でポーリング開始
-  stopHealthPolling: () => void;          // ポーリング停止
-
   // 動画ロード
   loadVideo: (file: File) => Promise<void>;
 
@@ -99,7 +90,7 @@ type VideoStoreActions = {
 
 ### 8.5.1 video 要素の生成
 
-`videoStore.ts` 内で2つの `<video>` を生成する。DOM ツリーには加えず、メモリ上で保持。`VideoCanvas` がこれらの要素から Canvas にフレームを描画する（Pixi の VideoSource には渡さない。詳細は [07-pixi-canvas.md §7.4.4](07-pixi-canvas.md#744-マスク重畳の実装)）。
+`videoStore.ts` のモジュールスコープで 1 つだけ生成する。DOM ツリーには加えず、メモリ上で保持。Pixi の `VideoSource` がこの要素から直接テクスチャを生成する（[07-pixi-canvas.md §7.4.4](07-pixi-canvas.md#744-動画スプライトの実装)）。
 
 ```ts
 function createVideoElement(): HTMLVideoElement {
@@ -110,6 +101,8 @@ function createVideoElement(): HTMLVideoElement {
   v.preload = "auto";
   return v;
 }
+const videoElement = createVideoElement();
+let videoObjectUrl: string | null = null;
 ```
 
 ### 8.5.2 ストア → VideoElement（コマンド）
@@ -118,54 +111,39 @@ function createVideoElement(): HTMLVideoElement {
 
 | アクション | VideoElement 操作 |
 |---|---|
-| `loadVideo(file)` | `videoElement.src = URL.createObjectURL(file)` |
-| `play()` | `videoElement.play()` + `maskVideoElement?.play()` |
-| `pause()` | `videoElement.pause()` + `maskVideoElement?.pause()` |
-| `seekTo(idx)` | `videoElement.currentTime = idx / fps` + マスクも同期 |
+| `loadVideo(file)` | 旧 `videoObjectUrl` を revoke → `URL.createObjectURL(file)` を `videoElement.src` に → `load()` |
+| `play()` | `videoElement.play()` |
+| `pause()` | `videoElement.pause()` |
+| `seekTo(idx)` | `pause()` 後に `videoElement.currentTime = idx / fps` |
 | `stepFrame(±1)` | `pause()` 後に `seekTo(currentFrame ± 1)` |
-| `runSegment` 完了時 | `maskVideoElement.src = URL.createObjectURL(blob)` → `maskVideoSrc` を新 URL に更新 |
-| `loadVideo(file)` 追加分 | `maskVideoSrc: null` に更新（Pixi にマスク削除を通知） |
+| `runSegment` 完了時 | `currentTime` と `paused` を保存 → 旧 `videoObjectUrl` を revoke → 合成 mp4 Blob を ObjectURL 化して `videoElement.src` に差し替え → `load()` → `canplay` 待機 → `currentTime` と再生状態を復元 |
+| `reset()` | `pause()` + `removeAttribute("src")` + `load()` + `videoObjectUrl` を revoke |
 
 ### 8.5.3 VideoElement → ストア（イベント）
 
-video 要素のイベントを購読してストアに反映する。リスナの登録・解除は `videoStore.ts` 内で完結させる。
+video 要素のイベントを購読してストアに反映する。リスナの登録は `videoStore.ts` 内のモジュール初期化時に一度だけ行う（要素は使い回すので再登録は不要）。
 
 | イベント | 反映 |
 |---|---|
 | `loadedmetadata` | `videoMeta.width/height` を実値で確定 |
-| `play` | `isPlaying = true` |
+| `play` | `isPlaying = true`、`bbox = null` |
 | `pause` | `isPlaying = false` |
-| `timeupdate` または `requestVideoFrameCallback` | `currentFrame = Math.round(currentTime * fps)` |
 | `ended` | `isPlaying = false` |
+| `timeupdate` | `currentFrame = Math.round(currentTime * fps)`（`videoMeta` 未確定のときはスキップ） |
+| `requestVideoFrameCallback`（利用可能時） | 同上、より高頻度で更新 |
 
-`requestVideoFrameCallback` が利用可能なら、`timeupdate` より精度が高いので優先する。
-
-### 8.5.4 マスク動画の同期
-
-マスク動画は原動画のアクション発火時に同期する。**再生中は `currentTime` を書き換えない**。
-
-再生中に `maskVideoElement.currentTime` を変更するとシーク命令が発行されてデコードパイプラインが中断し、フレームがずれる原因になる。そのため同期はアクション単位で行う:
-
-| アクション | マスク同期 |
-|---|---|
-| `play()` | 再生前に `mask.currentTime = video.currentTime` を設定してから両方 play |
-| `pause()` | 両方 pause |
-| `stepFrame(±1)` / `seekTo()` | 両方を同時に `currentTime = t` に設定（直列でなく並列） |
-| `loadVideo` | mask.src をクリア、`maskVideoSrc: null` |
-| `runSegment` 完了 | `canplay` 待機後に `mask.currentTime = video.currentTime` → `maskVideoSrc` 更新 |
-
-- マスク動画差し替え時は古い ObjectURL を `URL.revokeObjectURL` で必ず開放
-- フレーム単位の描画同期は `VideoCanvas` 側の Pixi ticker が担う（[07-pixi-canvas.md §7.4.5](07-pixi-canvas.md#745-同期原動画--マスク動画)）
+`requestVideoFrameCallback` が利用可能なら、`timeupdate` より精度が高いので併用する。
 
 ## 8.6 状態変更がトリガする副作用
 
 | 変更 | 副作用 |
 |---|---|
-| `isPlaying: false → true` | BBox を強制的に `null` にする（[09-state-transitions.md](09-state-transitions.md)） |
-| `currentFrame` が変わる（`stepFrame`/`seekTo`） | BBox を `null` にする |
+| `play()` | `bbox = null`（再生中に BBox が無効化されるため） |
+| `stepFrame()` / `seekTo()` | `bbox = null`（フレーム位置が変わるため）|
 | `runSegment` 開始 | `segmentState = "running"`、`bbox = null` |
-| `runSegment` 完了 | 新しいマスク mp4 を `maskVideoElement` に差し替え、`maskVideoSrc` 更新、旧URLを revoke |
-| `loadVideo` | 既存 `videoMeta` / `bbox` / `maskVideoSrc` を全クリア。`maskVideoElement.src` もクリア |
+| `runSegment` 完了 | サーバから返った合成 mp4 を `videoElement.src` に差し替え、再生位置を復元、`segmentState = "idle"` |
+| `runSegment` 失敗 | `segmentState = "error"`、`segmentError = message` |
+| `loadVideo` | 既存 `videoMeta` / `bbox` / `segmentState` を全クリア。`videoElement.src` を新規 ObjectURL に差し替え、バックエンドへも multipart アップロード |
 
 具体的な遷移は [09-state-transitions.md](09-state-transitions.md) で定義。
 
@@ -194,31 +172,28 @@ const { currentFrame, numFrames, fps } = useVideoStore(
 sequenceDiagram
     participant App
     participant Store as videoStore
-    participant BE as Backend
-    App->>Store: 初期化
-    Store->>Store: video / maskVideo 要素を生成
-    Store->>BE: /health (ポーリング開始)
-    BE-->>Store: model_state: loading
-    Store->>Store: modelState 更新
-    BE-->>Store: model_state: ready
-    Store->>Store: ポーリング停止 / modelState=ready
+    App->>Store: モジュールロード
+    Store->>Store: videoElement を生成 + イベントリスナ登録
+    App->>App: React マウント（特別な初期化呼び出しなし）
 ```
+
+`/health` ポーリングはフロントでは持たない。モデルがまだロード中なら `/session` 呼び出しでバックエンドが最大 5 秒待機し、超過時のみ 503 を返す（[04-api.md §4.7](04-api.md#47-タイムアウト方針)）。
 
 ## 8.9 終了処理
 
 `videoStore.reset()` または React のアンマウントで:
 
-- 両方の `videoElement.pause()` と `src=""`
-- すべての ObjectURL を `revokeObjectURL`
-- イベントリスナを解除
+- `videoElement.pause()` と `removeAttribute("src")` + `load()`
+- `videoObjectUrl` を `URL.revokeObjectURL`
+- `requestVideoFrameCallback` を発行している場合は `cancelVideoFrameCallback`
 - バックエンドのセッションはフロントから明示削除しない。サーバーは新規 `/session` 呼び出しで自動的に旧セッションを破棄する（[03-backend.md §3.5.2](03-backend.md#352-ライフタイム)）
 
 ## 8.10 実装チェックリスト
 
 - [ ] `videoStore.ts` 1 ファイル内に状態・アクション・VideoElement 同期がすべて存在
-- [ ] 2つの `<video>` 要素はストア内で生成・破棄される
+- [ ] `<video>` 要素はストアのモジュールスコープで 1 つだけ生成・破棄される
 - [ ] `loadedmetadata`, `play`, `pause`, `timeupdate` がストア状態に反映される
-- [ ] マスク動画が原動画の再生に追従する
-- [ ] 動画切替時に古い ObjectURL が revoke される
+- [ ] `runSegment` 完了時に合成 mp4 で `videoElement.src` を差し替え、再生位置と再生状態が復元される
+- [ ] `videoElement.src` 差し替え時に古い ObjectURL が revoke される
 - [ ] 再生開始 / シーク時に BBox がクリアされる
 - [ ] React コンポーネントはセレクタで購読し、不要な再レンダリングが起きない

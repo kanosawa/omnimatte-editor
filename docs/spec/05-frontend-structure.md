@@ -118,12 +118,11 @@ flowchart TD
 
 ```ts
 // api/client.ts のおおまかなインターフェース
-export async function getHealth(): Promise<HealthResponse>;
 export async function uploadVideo(file: File): Promise<SessionResponse>;
 export async function segment(req: SegmentRequest): Promise<Blob>;
 ```
 
-`videoStore` のアクション内でこれらを呼び、状態を更新する。
+`videoStore` のアクション内でこれらを呼び、状態を更新する。`/health` はフロントからはポーリングしない（バックエンド側でロード完了を待ち合わせるため）。
 
 ## 5.7 環境変数
 
@@ -131,8 +130,7 @@ export async function segment(req: SegmentRequest): Promise<Blob>;
 
 | 変数 | 用途 |
 |---|---|
-| `VITE_API_BASE` | バックエンドのベース URL |
-| `VITE_HEALTH_POLL_INTERVAL_MS` | `/health` ポーリング間隔（既定 1000） |
+| `VITE_API_BASE` | バックエンドのベース URL（既定 `http://localhost:8000`） |
 
 ## 5.8 Electron 側の責務
 
@@ -161,7 +159,7 @@ export async function segment(req: SegmentRequest): Promise<Blob>;
 
 - [ ] `frontend/` のディレクトリ構成が本仕様と一致
 - [ ] `App.tsx` が3段レイアウトを構成し、状態を直接持たない
-- [ ] `api/client.ts` が3エンドポイントを型付きで提供
+- [ ] `api/client.ts` が `/session` と `/segment` を型付きで提供
 - [ ] コンポーネントは `videoStore` を購読し、直接 fetch しない
 - [ ] `VITE_API_BASE` でバックエンドURLが切り替えられる
 - [ ] Electron が起動し、レンダラーで React アプリが描画される
