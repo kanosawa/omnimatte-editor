@@ -46,6 +46,57 @@ async def get_casper_state() -> str:
         return "unreachable"
 
 
+async def preload_casper(
+    base_video_path: str,
+    masks: np.ndarray,
+    fps: float,
+    width: int,
+    height: int,
+) -> None:
+    """sidecar の `POST /preload` を投げ捨てで叩き、先回り Casper 推論を依頼する。
+
+    `/segment` 完了直後に呼び、ユーザーが「前景削除」ボタンを押すまでの裏で
+    sidecar が Casper を回しキャッシュに保存しておく。本関数は失敗しても
+    例外を投げず（呼び出し側の処理を妨げないため）、ログだけ残す。
+    """
+    fd, mask_path = tempfile.mkstemp(prefix="casper_preload_mask_", suffix=".mp4")
+    os.close(fd)
+    try:
+        write_mask_mp4(masks=masks, fps=fps, out_path=mask_path)
+
+        url = f"{CASPER_SIDECAR_BASE}/preload"
+        # /preload は即時 202 を返すので read timeout は短めで OK
+        timeout = httpx.Timeout(connect=CASPER_STARTUP_TIMEOUT_SEC, read=10.0, write=60.0, pool=None)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                with open(base_video_path, "rb") as fv, open(mask_path, "rb") as fm:
+                    files = {
+                        "input_video": ("input_video.mp4", fv, "video/mp4"),
+                        "mask": ("mask_00.mp4", fm, "video/mp4"),
+                    }
+                    data = {
+                        "prompt": CASPER_DEFAULT_PROMPT,
+                        "fps": str(fps),
+                        "width": str(width),
+                        "height": str(height),
+                    }
+                    res = await client.post(url, files=files, data=data)
+            if res.status_code not in (200, 202):
+                logger.warning(
+                    "casper preload returned unexpected status %d: %s",
+                    res.status_code, res.text[:200],
+                )
+            else:
+                logger.info("casper preload accepted (status=%d)", res.status_code)
+        except (httpx.HTTPError, OSError) as exc:
+            logger.warning("casper preload request failed: %s", exc)
+    finally:
+        try:
+            os.unlink(mask_path)
+        except OSError:
+            pass
+
+
 async def run_casper(
     base_video_path: str,
     masks: np.ndarray,

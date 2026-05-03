@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from casper_server.holder import casper_holder
-from casper_server.routes import health, run
+from casper_server.routes import health, preload, run
 
 
 logging.basicConfig(
@@ -25,6 +25,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Omnimatte Casper Sidecar", lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(run.router)
+app.include_router(preload.router)
 
 
 def main() -> None:

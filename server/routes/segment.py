@@ -1,9 +1,11 @@
+import asyncio
 import logging
 
 import numpy as np
 import torch
 from fastapi import APIRouter, HTTPException, Response
 
+from server.casper_client import preload_casper
 from server.mask_store import mask_store
 from server.model import SAM2_DEVICE, model_holder
 from server.schemas import SegmentRequest
@@ -92,6 +94,19 @@ async def segment(req: SegmentRequest) -> Response:
         masks=masks_array,
         base_video_path=session.base_video_path,
         fps=fps,
+    )
+
+    # 先回り Casper 推論を sidecar にバックグラウンドで依頼。
+    # ユーザーが結果を眺めて「前景削除」ボタンを押すまでに sidecar が
+    # 計算を済ませてキャッシュするので、/remove は cache hit で即返ることが期待される。
+    asyncio.create_task(
+        preload_casper(
+            base_video_path=session.base_video_path,
+            masks=masks_array,
+            fps=fps,
+            width=session.width,
+            height=session.height,
+        )
     )
 
     return Response(content=mp4_bytes, media_type="video/mp4")

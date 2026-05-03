@@ -39,15 +39,18 @@ server/                # 本サーバ
 │   └── removal.py
 └── schemas.py         # Pydantic スキーマ
 
-casper_server/         # Casper sidecar
-├── __init__.py        # 空
-├── main.py            # FastAPI 起動、lifespan で Casper プリロード
-├── holder.py          # CasperHolder（loading/ready/failed）
-├── pipeline.py        # gen-omnimatte-public の load_pipeline / run_inference を absl 非依存で再実装
+casper_server/             # Casper sidecar
+├── __init__.py            # 空
+├── main.py                # FastAPI 起動、lifespan で Casper プリロード
+├── holder.py              # CasperHolder（loading/ready/failed）
+├── pipeline.py            # gen-omnimatte-public の load_pipeline / run_inference を absl 非依存で再実装
+├── runner.py              # /run と /preload で共有する pipeline 実行ヘルパ + run_lock
+├── output_cache.py        # 出力 mp4 のキャッシュ（key = video md5 + mask md5）
 └── routes/
     ├── __init__.py
     ├── health.py
-    └── run.py
+    ├── run.py             # POST /run（cache hit 時は即返す）
+    └── preload.py         # POST /preload（先回り推論を 202 即時応答 + バックグラウンド実行）
 ```
 
 ## 3.3 設定
@@ -459,12 +462,39 @@ flowchart TB
 
 解像度ミスマッチ（Casper 出力サイズ ≠ base video サイズ）の場合、Casper 側を **bilinear で base 解像度にリサイズ** してから合成する。最終出力は **base video 解像度**。
 
+### 3.10.3a 出力キャッシュと `/preload`（先回り推論）
+
+`/run` の応答時間を短縮するため、sidecar 内に **出力 mp4 のキャッシュ** (`output_cache`) を持ち、本サーバが `/segment` 完了直後に sidecar `/preload` を投げ捨てで叩いて先回り推論させる。
+
+#### 仕組み
+
+1. 本サーバの `/segment` が完了 → `mask_store.set()` の直後に `asyncio.create_task(preload_casper(...))` で投げ捨て発射
+2. sidecar `/preload` は multipart を受けて即 `202 Accepted` を返す。バックグラウンドタスクで full pipeline を走らせる
+3. ユーザーが結果動画を眺めて「前景削除」ボタンを押すまでに、sidecar が完了して `output_cache` に mp4 を保存
+4. ユーザーが押下 → `/remove` → sidecar `/run` → cache hit で即返す（拡散の 10s も含めて全部スキップ）
+
+#### キャッシュ仕様
+
+- 保持: 単一スロット（`(video md5, mask md5)` → mp4 bytes）
+- 容量: mp4 1 本（数〜数十 MB 程度）
+- 排他: `runner.run_lock` を `/run` と `/preload` で共有。同時に pipeline は 1 件しか走らない
+- 無効化: 新しい `(video, mask)` の hash で上書き（自動）。明示的な clear API は無し
+- 整合性: `(video md5, mask md5)` が完全一致したときのみ hit。`/remove` で base video が差し替わった後の `/segment` は新しい hash を出すので自然に miss → 新規 cache 構築
+
+#### 並行性ケース
+
+- ケース A（理想）: `/preload` が完了済み → `/run` は cache hit で即返す
+- ケース B: `/run` が来たが `/preload` まだ進行中 → `/run` は `run_lock` 待ち → 解放後 cache を再 check して hit → 即返す
+- ケース C: ユーザーが `/preload` トリガ前に `/remove` を押した → cache miss → `/run` が full pipeline を回し、結果を cache に保存
+- ケース D: `/segment` を再実行（マスク変更）→ 古い hash の cache は残るが新しい hash で上書きはされない（単一スロット replace）。次の cache 書き込み時に置き換え
+
 ### 3.10.4 sidecar API
 
 | パス | メソッド | 概要 |
 |---|---|---|
 | `/health` | GET | sidecar 稼働確認 + Casper ロード状態 |
-| `/run` | POST (multipart) | input_video.mp4 + mask_00.mp4 + form fields → 前景削除済み mp4 |
+| `/run` | POST (multipart) | input_video.mp4 + mask_00.mp4 + form fields → 前景削除済み mp4。**output_cache に hit すれば即返す** |
+| `/preload` | POST (multipart) | `/run` と同じ multipart を受け、即 `202 Accepted`。バックグラウンドで pipeline を回し `output_cache` に保存 |
 
 #### `/health`
 
@@ -499,15 +529,31 @@ Error:
 | HTTP | 内容 |
 |---|---|
 | 503 | `casper not ready (timeout)` / `casper failed to load: ...` |
-| 409 | `another run is in progress`（同時実行を許さないため） |
 | 500 | `casper run failed: <stderr 抜粋>` |
 | 422 | multipart のバリデーション |
 
+#### `/preload`
+
+`/run` と全く同じ multipart を受ける。違いは:
+
+- **即時に `202 Accepted`** を返す（推論完了を待たない）
+- バックグラウンドタスクで `do_pipeline_run` を実行し、結果 mp4 を `output_cache` に保存
+- 既に同じ `(video_hash, mask_hash)` でキャッシュ済みなら何もせず終了
+- 失敗してもエラーを返さない（投げ捨てなのでログのみ）
+
+Response (202):
+```json
+{ "status": "accepted" }
+```
+
 ### 3.10.5 同時実行制御
 
-sidecar は **同時に 1 件しか処理しない**。`/run` 内で `asyncio.Lock` を保持し、ロック取得済みの間に来た 2 件目は即 409 を返す（待たせない）。
+sidecar は **同時に 1 件しか pipeline を回さない**。`runner.run_lock`（`asyncio.Lock`）を `/run` と `/preload` の双方が共有する。
 
-理由: GPU メモリと一貫性確保。本サーバ側は `removeState === "running"` の間に `/remove` を再発火しないため、通常のフローで衝突しないが、二重防御として sidecar 側でも弾く。
+- `/run`: ロック待ち（タイムアウトなし）。待っている間に他の処理（=`/preload`）が cache を書いてくれた場合、ロック取得後の再 check で hit して即返す
+- `/preload`: ロック待ち。取得したら full pipeline を回して cache に保存
+
+旧仕様の「2 件目は即 409」は撤回した。理由: cache 機構があるので、同じ入力での重複呼び出しは待つだけで cache hit して即返るため。フロント側もボタン disabled で多重発火を防いでいる。
 
 ### 3.10.6 sidecar クラッシュ時の扱い
 
