@@ -73,9 +73,10 @@ async def segment(req: SegmentRequest) -> Response:
     results: dict[int, np.ndarray] = {}
 
     try:
-        # 1. 画像プレディクタで multimask 候補を取得し、ユーザー bbox を最も埋める候補を採用。
-        #    SAM2 既定の「IoU スコア最高」選択ではサブパーツが拾われがちなため。
-        best_initial_mask = _select_best_mask_candidate_for_bbox(
+        # 1. 反復補正で初期マスクを得る（SAM2 image predictor 1〜2 回）。
+        #    初回は bbox のみで予測し、サブコンポーネント疑い（fill_ratio < 閾値）なら
+        #    「bbox 内かつマスク外」の最大連結成分の重心に positive point を追加して再予測。
+        best_initial_mask = _refine_mask_iteratively_for_bbox(
             video_predictor=predictor,
             base_video_path=session.base_video_path,
             frame_idx=req.frame_idx,
@@ -191,20 +192,34 @@ def _compute_iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(inter) / float(union)
 
 
-def _select_best_mask_candidate_for_bbox(
+# 反復補正の閾値: bbox 内に対するマスク面積の比がこれ未満なら
+# 「サブコンポーネント疑い」とみなして positive point を追加して再予測する
+_REFINE_FILL_RATIO_THRESHOLD = 0.5
+# 追加する positive point の最大数
+_REFINE_MAX_POINTS = 3
+# 追加候補とする「bbox 内かつマスク外」の連結成分の最小面積（bbox 面積比）
+_REFINE_MIN_COMPONENT_AREA_RATIO = 0.02
+
+
+def _refine_mask_iteratively_for_bbox(
     video_predictor,
     base_video_path: str,
     frame_idx: int,
     bbox: list[float],
 ) -> np.ndarray:
-    """SAM2 画像プレディクタで multimask 候補 3 つを取得し、ユーザー bbox を
-    最も埋める候補を選んで返す。
+    """SAM2 画像プレディクタで反復補正してマスクを得る（案 Y）。
 
-    SAM2 既定の「IoU スコア最高」選択は、bbox 内のサブパーツ（顔だけ、車輪だけ等）が
-    高スコアになり物体全体が拾えないケースが少なくない。bbox 内に占める面積比で
-    選び直すことで、ユーザーの意図に沿ったマスクを採用する。
+    アルゴリズム:
+      1. bbox のみで予測 → 初回マスク M0
+      2. M0 が bbox を埋める比率（fill_ratio）を計算
+      3. fill_ratio >= threshold なら M0 を採用してリターン
+      4. 「bbox 内かつ M0 外」の連結成分のうち面積上位を抽出、それぞれの重心を
+         positive point として追加し再予測 → M1
+      5. M1 が M0 より bbox を埋めれば M1、そうでなければ M0 を採用
 
-    返り値: `(H, W) bool` の選ばれたマスク。`video_predictor.add_new_mask` に渡す。
+    案 X（multimask 候補から fill ratio 最大を選ぶ）の弊害（背景まで含む候補が
+    選ばれる）を避け、「最初に SAM2 が選んだ自然なマスク」を出発点にして必要時
+    だけ拡張する保守的な戦略。
     """
     from sam2.sam2_image_predictor import SAM2ImagePredictor
 
@@ -216,36 +231,119 @@ def _select_best_mask_candidate_for_bbox(
     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
     bbox_np = np.array(bbox, dtype=np.float32)
-    with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
-        image_predictor.set_image(frame_rgb)
-        masks, scores, _ = image_predictor.predict(
-            box=bbox_np,
-            multimask_output=True,
-        )
-    # masks: (N, H, W) uint8 or bool; scores: (N,) float
-
-    if len(masks) == 0:
-        raise RuntimeError("SAM2 image predictor returned no candidates")
-
-    # bbox を画像範囲にクリップ
-    h, w = masks.shape[1], masks.shape[2]
+    h, w = frame_rgb.shape[:2]
     x1, y1, x2, y2 = [int(round(v)) for v in bbox]
     x1 = max(0, x1); y1 = max(0, y1)
     x2 = min(w, x2); y2 = min(h, y2)
     bbox_area = max(1, (x2 - x1) * (y2 - y1))
 
-    ratios = []
-    for m in masks:
-        m_bool = m.astype(bool) if m.dtype != bool else m
-        in_bbox = m_bool[y1:y2, x1:x2].sum()
-        ratios.append(float(in_bbox) / float(bbox_area))
+    with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
+        image_predictor.set_image(frame_rgb)
 
-    best_idx = int(np.argmax(ratios))
-    best_mask = masks[best_idx].astype(bool) if masks[best_idx].dtype != bool else masks[best_idx]
-    logger.info(
-        "multimask candidates: scores=%s fill_ratios=%s -> picked idx=%d",
-        [f"{s:.3f}" for s in scores.tolist()],
-        [f"{r:.3f}" for r in ratios],
-        best_idx,
+        # 1. 初回予測（bbox のみ、SAM2 既定の選択に任せる）
+        masks_0, _scores_0, _ = image_predictor.predict(
+            box=bbox_np,
+            multimask_output=False,
+        )
+        if len(masks_0) == 0:
+            raise RuntimeError("SAM2 image predictor returned no mask")
+        mask_0 = masks_0[0].astype(bool)
+
+        in_bbox_0 = int(mask_0[y1:y2, x1:x2].sum())
+        ratio_0 = in_bbox_0 / bbox_area
+        logger.info("refine: initial fill_ratio=%.3f (threshold=%.3f)", ratio_0, _REFINE_FILL_RATIO_THRESHOLD)
+
+        if ratio_0 >= _REFINE_FILL_RATIO_THRESHOLD:
+            return mask_0
+
+        # 2. サブコンポーネント疑い → 追加 positive point を探す
+        refine_points = _find_refinement_points(mask_0, (x1, y1, x2, y2), bbox_area)
+        if not refine_points:
+            logger.info("refine: no refinement points found, using initial mask")
+            return mask_0
+
+        point_coords = np.array(refine_points, dtype=np.float32)
+        point_labels = np.ones(len(refine_points), dtype=np.int32)  # 全て positive
+        logger.info("refine: re-predicting with %d positive points: %s",
+                    len(refine_points),
+                    [(f"{p[0]:.0f}", f"{p[1]:.0f}") for p in refine_points])
+
+        # 3. 再予測（bbox + 追加 positive points）
+        masks_1, _scores_1, _ = image_predictor.predict(
+            box=bbox_np,
+            point_coords=point_coords,
+            point_labels=point_labels,
+            multimask_output=False,
+        )
+        mask_1 = masks_1[0].astype(bool)
+
+        in_bbox_1 = int(mask_1[y1:y2, x1:x2].sum())
+        ratio_1 = in_bbox_1 / bbox_area
+        logger.info("refine: refined fill_ratio=%.3f", ratio_1)
+
+        # 4. サニティチェック: 補正で fill_ratio が下がったら初回マスクに戻す
+        if ratio_1 < ratio_0:
+            logger.info("refine: refinement reduced fill_ratio (%.3f -> %.3f), falling back",
+                        ratio_0, ratio_1)
+            return mask_0
+
+        return mask_1
+
+
+def _find_refinement_points(
+    mask: np.ndarray,
+    bbox_clipped: tuple[int, int, int, int],
+    bbox_area: int,
+) -> list[tuple[float, float]]:
+    """「bbox 内かつ mask 外」の領域から positive point の候補を抽出する。
+
+    アルゴリズム:
+      1. (in_bbox AND not mask) のバイナリを作る
+      2. 連結成分に分割（cv2.connectedComponentsWithStats）
+      3. 面積上位、かつ bbox 面積比 >= 閾値の成分を最大 N 個選ぶ
+      4. 各成分の重心を point として返す。重心が成分外（凹形状）なら成分内の
+         代表ピクセルにフォールバック
+
+    返り値: `[(x, y), ...]` のピクセル座標リスト
+    """
+    h, w = mask.shape
+    x1, y1, x2, y2 = bbox_clipped
+
+    bbox_region = np.zeros_like(mask, dtype=np.uint8)
+    bbox_region[y1:y2, x1:x2] = 1
+    candidate = bbox_region & (~mask).astype(np.uint8)
+    if candidate.sum() == 0:
+        return []
+
+    n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(candidate, connectivity=8)
+    if n_labels <= 1:  # label 0 は背景
+        return []
+
+    min_area = max(1, int(_REFINE_MIN_COMPONENT_AREA_RATIO * bbox_area))
+
+    # ラベル 1.. の (area, idx) を面積降順
+    components = sorted(
+        ((int(stats[i, cv2.CC_STAT_AREA]), i) for i in range(1, n_labels)),
+        reverse=True,
     )
-    return best_mask
+
+    points: list[tuple[float, float]] = []
+    for area, idx in components:
+        if area < min_area:
+            break
+        cx, cy = centroids[idx]
+        cx_int = int(round(cx))
+        cy_int = int(round(cy))
+        # 重心が成分内にあればそのまま使う。凹形状で外側に落ちる場合は成分内
+        # の代表ピクセル（中央値）にフォールバック
+        if 0 <= cy_int < h and 0 <= cx_int < w and labels[cy_int, cx_int] == idx:
+            points.append((float(cx), float(cy)))
+        else:
+            ys, xs = np.where(labels == idx)
+            if len(xs) > 0:
+                mid = len(xs) // 2
+                points.append((float(xs[mid]), float(ys[mid])))
+        if len(points) >= _REFINE_MAX_POINTS:
+            break
+
+    return points

@@ -340,7 +340,12 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 2. `SessionSlot.current()` で現在のセッションを取得（無ければ 409）
 3. `frame_idx` の範囲チェック（無効なら 422）
 4. **`full_foreground_store.wait_ready(timeout=600.0)` で全前景抽出の完了を待機**（バックグラウンドで進行中の場合あり）
-5. **`SAM2ImagePredictor` で multimask 候補（3 つ）を取得し、ユーザー bbox を最も埋める候補を選んで初期マスクとする**（`_select_best_mask_candidate_for_bbox`）。SAM2 既定の「IoU スコア最高」だとサブパーツが拾われがちなため、bbox 内 fill ratio で選び直す
+5. **`SAM2ImagePredictor` で反復補正により初期マスクを得る**（`_refine_mask_iteratively_for_bbox`）:
+   - (a) bbox のみで予測 → 初回マスク M0 を取得（SAM2 既定の単一選択に従う）
+   - (b) M0 が bbox を埋める比率（`fill_ratio`）を計算
+   - (c) `fill_ratio >= 0.5` なら M0 を採用（必要十分）
+   - (d) 未満の場合「サブコンポーネント疑い」とみなし、`bbox 内 ∧ ¬M0` の連結成分の中で面積上位の重心を `positive point` として最大 3 つ追加して再予測 → M1
+   - (e) M1 の `fill_ratio` が M0 より小さくなったら M0 にフォールバック（補正失敗の保険）
 6. `predictor.reset_state(state)` で前回結果をクリア
 7. `predictor.add_new_mask(frame_idx, obj_id=0, mask=best_initial_mask)` で初期マスクを登録
 8. 順方向と逆方向の `propagate_in_video` を実行し、フレーム別マスク `masks_target (T,H,W) bool` を取得
