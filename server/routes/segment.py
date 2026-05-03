@@ -200,6 +200,12 @@ _REFINE_MAX_POINTS = 3
 # 追加候補とする「bbox 内かつマスク外」の連結成分の最小面積（bbox 面積比）
 _REFINE_MIN_COMPONENT_AREA_RATIO = 0.02
 
+# bbox 周辺をクロップする時のマージン（bbox サイズに対する比率）
+_CROP_MARGIN_RATIO = 0.5
+# クロップ後の画像を upscale する目標サイズ（長辺）。SAM2 内部は 1024 で動くため、
+# bbox 周辺の effective 解像度を上げて detail を引き出す
+_UPSCALE_TARGET_LONG_SIDE = 1024
+
 
 def _refine_mask_iteratively_for_bbox(
     video_predictor,
@@ -207,19 +213,18 @@ def _refine_mask_iteratively_for_bbox(
     frame_idx: int,
     bbox: list[float],
 ) -> np.ndarray:
-    """SAM2 画像プレディクタで反復補正してマスクを得る（案 Y）。
+    """SAM2 画像プレディクタで反復補正してマスクを得る（案 Y + 案 A: bbox crop + upscale）。
 
     アルゴリズム:
-      1. bbox のみで予測 → 初回マスク M0
-      2. M0 が bbox を埋める比率（fill_ratio）を計算
-      3. fill_ratio >= threshold なら M0 を採用してリターン
-      4. 「bbox 内かつ M0 外」の連結成分のうち面積上位を抽出、それぞれの重心を
-         positive point として追加し再予測 → M1
-      5. M1 が M0 より bbox を埋めれば M1、そうでなければ M0 を採用
-
-    案 X（multimask 候補から fill ratio 最大を選ぶ）の弊害（背景まで含む候補が
-    選ばれる）を避け、「最初に SAM2 が選んだ自然なマスク」を出発点にして必要時
-    だけ拡張する保守的な戦略。
+      1. bbox 周辺 + マージンでフレームをクロップ
+      2. クロップを長辺 1024 に upscale（cv2.INTER_CUBIC）— SAM2 の内部解像度に
+         合わせて effective 解像度を上げ、低解像度動画でも精度を確保
+      3. 拡大後のクロップ + 変換した bbox で SAM2 image predictor を実行 → M0
+      4. M0 が bbox を埋める比率（fill_ratio）を計算
+      5. fill_ratio >= threshold なら M0 を採用
+      6. それ以外は「bbox 内かつ M0 外」の連結成分の重心を positive point として
+         追加し再予測 → M1。M1 が M0 より良ければ M1、そうでなければ M0
+      7. 最終マスクを元解像度にダウンスケールし、原座標に貼り戻す
     """
     from sam2.sam2_image_predictor import SAM2ImagePredictor
 
@@ -229,65 +234,113 @@ def _refine_mask_iteratively_for_bbox(
 
     frame_bgr = read_frame_at(base_video_path, frame_idx)
     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    h_orig, w_orig = frame_rgb.shape[:2]
 
-    bbox_np = np.array(bbox, dtype=np.float32)
-    h, w = frame_rgb.shape[:2]
-    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
-    x1 = max(0, x1); y1 = max(0, y1)
-    x2 = min(w, x2); y2 = min(h, y2)
-    bbox_area = max(1, (x2 - x1) * (y2 - y1))
+    # 1. bbox 周辺 + マージンでクロップ
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    bw = x2 - x1
+    bh = y2 - y1
+    cx1 = max(0, int(round(x1 - bw * _CROP_MARGIN_RATIO)))
+    cy1 = max(0, int(round(y1 - bh * _CROP_MARGIN_RATIO)))
+    cx2 = min(w_orig, int(round(x2 + bw * _CROP_MARGIN_RATIO)))
+    cy2 = min(h_orig, int(round(y2 + bh * _CROP_MARGIN_RATIO)))
+    if cx2 <= cx1 or cy2 <= cy1:
+        raise RuntimeError(f"invalid crop region: ({cx1},{cy1})-({cx2},{cy2})")
+    crop = frame_rgb[cy1:cy2, cx1:cx2]
+    crop_h, crop_w = crop.shape[:2]
+
+    # 2. 長辺 1024 に upscale（小さい場合のみ）
+    long_side = max(crop_h, crop_w)
+    if long_side < _UPSCALE_TARGET_LONG_SIDE:
+        scale = _UPSCALE_TARGET_LONG_SIDE / long_side
+        new_w = int(round(crop_w * scale))
+        new_h = int(round(crop_h * scale))
+        crop_proc = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+    else:
+        scale = 1.0
+        crop_proc = crop
+    proc_h, proc_w = crop_proc.shape[:2]
+
+    # 3. bbox を crop+scale 座標系に変換
+    bbox_np = np.array(
+        [(x1 - cx1) * scale, (y1 - cy1) * scale, (x2 - cx1) * scale, (y2 - cy1) * scale],
+        dtype=np.float32,
+    )
+    bx1 = max(0, int(round(bbox_np[0])))
+    by1 = max(0, int(round(bbox_np[1])))
+    bx2 = min(proc_w, int(round(bbox_np[2])))
+    by2 = min(proc_h, int(round(bbox_np[3])))
+    bbox_clipped_proc = (bx1, by1, bx2, by2)
+    bbox_area = max(1, (bx2 - bx1) * (by2 - by1))
+
+    logger.info(
+        "refine: frame=%dx%d crop=%dx%d (margin=%.1f) → proc=%dx%d (scale=%.2f)",
+        w_orig, h_orig, crop_w, crop_h, _CROP_MARGIN_RATIO, proc_w, proc_h, scale,
+    )
 
     with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
-        image_predictor.set_image(frame_rgb)
+        image_predictor.set_image(crop_proc)
 
-        # 1. 初回予測（bbox のみ、SAM2 既定の選択に任せる）
+        # 4. 初回予測（bbox のみ、SAM2 既定の選択に任せる）
         masks_0, _scores_0, _ = image_predictor.predict(
             box=bbox_np,
             multimask_output=False,
         )
         if len(masks_0) == 0:
             raise RuntimeError("SAM2 image predictor returned no mask")
-        mask_0 = masks_0[0].astype(bool)
+        mask_0_proc = masks_0[0].astype(bool)
 
-        in_bbox_0 = int(mask_0[y1:y2, x1:x2].sum())
+        in_bbox_0 = int(mask_0_proc[by1:by2, bx1:bx2].sum())
         ratio_0 = in_bbox_0 / bbox_area
         logger.info("refine: initial fill_ratio=%.3f (threshold=%.3f)", ratio_0, _REFINE_FILL_RATIO_THRESHOLD)
 
         if ratio_0 >= _REFINE_FILL_RATIO_THRESHOLD:
-            return mask_0
+            mask_proc = mask_0_proc
+        else:
+            # 5. サブコンポーネント疑い → 追加 positive point を探す
+            refine_points = _find_refinement_points(mask_0_proc, bbox_clipped_proc, bbox_area)
+            if not refine_points:
+                logger.info("refine: no refinement points found, using initial mask")
+                mask_proc = mask_0_proc
+            else:
+                point_coords = np.array(refine_points, dtype=np.float32)
+                point_labels = np.ones(len(refine_points), dtype=np.int32)  # 全て positive
+                logger.info("refine: re-predicting with %d positive points: %s",
+                            len(refine_points),
+                            [(f"{p[0]:.0f}", f"{p[1]:.0f}") for p in refine_points])
 
-        # 2. サブコンポーネント疑い → 追加 positive point を探す
-        refine_points = _find_refinement_points(mask_0, (x1, y1, x2, y2), bbox_area)
-        if not refine_points:
-            logger.info("refine: no refinement points found, using initial mask")
-            return mask_0
+                # 6. 再予測（bbox + 追加 positive points）
+                masks_1, _scores_1, _ = image_predictor.predict(
+                    box=bbox_np,
+                    point_coords=point_coords,
+                    point_labels=point_labels,
+                    multimask_output=False,
+                )
+                mask_1_proc = masks_1[0].astype(bool)
 
-        point_coords = np.array(refine_points, dtype=np.float32)
-        point_labels = np.ones(len(refine_points), dtype=np.int32)  # 全て positive
-        logger.info("refine: re-predicting with %d positive points: %s",
-                    len(refine_points),
-                    [(f"{p[0]:.0f}", f"{p[1]:.0f}") for p in refine_points])
+                in_bbox_1 = int(mask_1_proc[by1:by2, bx1:bx2].sum())
+                ratio_1 = in_bbox_1 / bbox_area
+                logger.info("refine: refined fill_ratio=%.3f", ratio_1)
 
-        # 3. 再予測（bbox + 追加 positive points）
-        masks_1, _scores_1, _ = image_predictor.predict(
-            box=bbox_np,
-            point_coords=point_coords,
-            point_labels=point_labels,
-            multimask_output=False,
-        )
-        mask_1 = masks_1[0].astype(bool)
+                # サニティチェック: 補正で fill_ratio が下がったら初回マスクに戻す
+                if ratio_1 < ratio_0:
+                    logger.info("refine: refinement reduced fill_ratio (%.3f -> %.3f), falling back",
+                                ratio_0, ratio_1)
+                    mask_proc = mask_0_proc
+                else:
+                    mask_proc = mask_1_proc
 
-        in_bbox_1 = int(mask_1[y1:y2, x1:x2].sum())
-        ratio_1 = in_bbox_1 / bbox_area
-        logger.info("refine: refined fill_ratio=%.3f", ratio_1)
+    # 7. 元解像度にダウンスケールして原座標に貼り戻す
+    if scale != 1.0:
+        mask_crop = cv2.resize(
+            mask_proc.astype(np.uint8), (crop_w, crop_h), interpolation=cv2.INTER_NEAREST
+        ).astype(bool)
+    else:
+        mask_crop = mask_proc
 
-        # 4. サニティチェック: 補正で fill_ratio が下がったら初回マスクに戻す
-        if ratio_1 < ratio_0:
-            logger.info("refine: refinement reduced fill_ratio (%.3f -> %.3f), falling back",
-                        ratio_0, ratio_1)
-            return mask_0
-
-        return mask_1
+    full_mask = np.zeros((h_orig, w_orig), dtype=bool)
+    full_mask[cy1:cy2, cx1:cx2] = mask_crop
+    return full_mask
 
 
 def _find_refinement_points(
