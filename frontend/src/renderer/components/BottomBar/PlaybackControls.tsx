@@ -4,12 +4,16 @@ export function PlaybackControls() {
   const videoMeta = useVideoStore((s) => s.videoMeta);
   const isPlaying = useVideoStore((s) => s.isPlaying);
   const currentFrame = useVideoStore((s) => s.currentFrame);
+  const segmentState = useVideoStore((s) => s.segmentState);
+  const removeState = useVideoStore((s) => s.removeState);
   const togglePlay = useVideoStore((s) => s.togglePlay);
   const stepFrame = useVideoStore((s) => s.stepFrame);
 
   const isLoaded = videoMeta !== null;
   const numFrames = videoMeta?.numFrames ?? 0;
-  const canStep = isLoaded && !isPlaying;
+  const isBusy = segmentState === "running" || removeState === "running";
+  const canPlay = isLoaded && !isBusy;
+  const canStep = canPlay && !isPlaying;
 
   return (
     <div className="playback-controls">
@@ -23,7 +27,7 @@ export function PlaybackControls() {
       </button>
       <button
         className="btn btn-icon"
-        disabled={!isLoaded}
+        disabled={!canPlay}
         onClick={togglePlay}
         title={isPlaying ? "停止" : "再生"}
       >

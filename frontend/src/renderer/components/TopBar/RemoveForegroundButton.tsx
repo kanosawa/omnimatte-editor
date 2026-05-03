@@ -13,8 +13,9 @@ export function RemoveForegroundButton() {
   const isSegmenting = segmentState === "running";
   const isRemoving = removeState === "running";
 
+  // SAM2 マスクを持っていて、かつ再生状態のときのみ有効
   const enabled =
-    isLoaded && !isPlaying && hasSegmentation && !isSegmenting && !isRemoving;
+    isLoaded && isPlaying && hasSegmentation && !isSegmenting && !isRemoving;
 
   const label = isRemoving ? "処理中…" : "前景を削除";
 

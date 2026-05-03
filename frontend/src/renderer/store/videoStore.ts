@@ -39,6 +39,7 @@ function createVideoElement(): HTMLVideoElement {
   v.muted = true;
   v.playsInline = true;
   v.preload = "auto";
+  v.loop = true;
   return v;
 }
 
@@ -181,7 +182,8 @@ export const useVideoStore = create<VideoStore>((set, get) => {
       if (!videoMeta || !bbox || segmentState === "running") return;
 
       const sentBbox: [number, number, number, number] = [bbox.x1, bbox.y1, bbox.x2, bbox.y2];
-      set({ segmentState: "running", segmentError: null, bbox: null });
+      // BBox は表示したまま推論を走らせる（合成 mp4 を表示し始める段階でクリアする）
+      set({ segmentState: "running", segmentError: null });
 
       try {
         const blob = await segment({
@@ -189,21 +191,20 @@ export const useVideoStore = create<VideoStore>((set, get) => {
           bbox: sentBbox,
         });
 
-        // 再生位置と再生状態を保存して、合成動画に差し替え後に復元する
+        // 再生位置を保存して、合成動画に差し替え後に復元する
         const restoreTime = videoElement.currentTime;
-        const wasPaused = videoElement.paused;
 
         if (videoObjectUrl) URL.revokeObjectURL(videoObjectUrl);
         videoObjectUrl = URL.createObjectURL(blob);
         videoElement.src = videoObjectUrl;
         videoElement.load();
 
-        // canplay を待ってから再生位置を復元する
+        // canplay を待ってから再生位置を復元し、必ず再生状態にする
         await new Promise<void>((resolve) => {
           const onCanPlay = () => {
             videoElement.removeEventListener("canplay", onCanPlay);
             try { videoElement.currentTime = restoreTime; } catch { /* ignore */ }
-            if (!wasPaused) void videoElement.play();
+            void videoElement.play();
             resolve();
           };
           videoElement.addEventListener("canplay", onCanPlay, { once: true });
@@ -214,8 +215,10 @@ export const useVideoStore = create<VideoStore>((set, get) => {
           }, 5000);
         });
 
-        set({ segmentState: "idle", hasSegmentation: true });
+        // 合成 mp4 の表示が始まる段階で BBox をクリアする
+        set({ segmentState: "idle", hasSegmentation: true, bbox: null });
       } catch (err) {
+        // 失敗時は BBox を残してユーザーが再試行できるようにする
         const message = err instanceof Error ? err.message : String(err);
         set({ segmentState: "error", segmentError: message });
       }

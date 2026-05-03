@@ -22,7 +22,7 @@ CASPER_CONFIG_PATH = "config/default_wan.py"  # CASPER_REPO_DIR からの相対
 # 推論解像度は固定値ではなく、リクエストごとに base video の解像度から動的に決定する
 # （sidecar 側で 16 の倍数に丸める）
 CASPER_FPS = 8
-CASPER_NUM_INFERENCE_STEPS = 1
+CASPER_NUM_INFERENCE_STEPS = 2
 CASPER_TEMPORAL_WINDOW_SIZE = 21
 CASPER_MATTING_MODE = "all_fg"
 CASPER_DEFAULT_PROMPT = "a clean background video."

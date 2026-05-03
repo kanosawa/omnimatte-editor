@@ -40,16 +40,16 @@ stateDiagram-v2
 | Active | 確定済み | 矩形を表示 | `Bbox` |
 | Sent | SAM2 へ送信済み | 表示はクリア（[9.2.3](#923-sam2-送信時の-bbox-クリア仕様) 参照） | `null` |
 
-### 9.2.3 SAM2 送信時の BBox クリア仕様
+### 9.2.3 SAM2 結果表示時の BBox クリア仕様
 
-> 要件: 「SAM2ボタンを押してバウンディングボックスの情報を送ったら、新たなバウンディングボックスの指定をできるようにする」
+> 要件: 「SAM2 で検出し始める時に BBox の表示を消さない」「SAM2 の検出結果を表示し始める時に BBox の表示を消す」
 
-これに従い、**SAM2 ボタン押下と同時に BBox をクリアする**。具体的には:
+これに従い、**SAM2 ボタン押下時には BBox を消さず、推論完了で合成 mp4 の表示が始まる段階でクリアする**。具体的には:
 
-- `runSegment` の最初で `bbox` を `null` にし、表示も消す
-- 直後から、ユーザーは新しい BBox を描き始められる
-- 推論中であっても新規 BBox 描画は **可能**（描いておけば、推論完了後に SAM2 ボタンを押せる）
-- ただし、推論中は SAM2 ボタンは disabled なので、新規 BBox を描いても即時実行はできない
+- `runSegment` 開始時は `bbox` を保持（送信内容が画面に出続けるため、ユーザーが何を投げたか視認できる）
+- 推論中は BBox 入力が disabled なので、表示中の BBox を編集することはできない
+- 推論完了で `videoElement.src` が合成 mp4 に差し替わり、`canplay` 後の自動再生開始と同タイミングで `bbox = null` にする
+- 推論失敗時は BBox を残す（ユーザーが再度 SAM2 ボタンを押せる）
 
 ### 9.2.4 BBox を強制クリアするトリガ
 
@@ -59,7 +59,7 @@ stateDiagram-v2
 | `stepFrame(±1)` でコマ送り／戻し | BBox クリア |
 | `seekTo()` でシーク | BBox クリア |
 | `loadVideo()` で動画切替 | BBox クリア（他の状態も含めてリセット） |
-| `runSegment()` 開始 | BBox クリア（[9.2.3](#923-sam2-送信時の-bbox-クリア仕様)） |
+| `runSegment()` 完了 | BBox クリア（[9.2.3](#923-sam2-結果表示時の-bbox-クリア仕様)）。`runSegment()` **開始** ではクリアしない |
 | `runRemoveForeground()` 開始 | BBox クリア。前景削除中は新規 BBox 描画も無効 |
 | `runRemoveForeground()` 完了 | `hasSegmentation = false` に戻り、合成 mp4 を破棄して新 base video を表示 |
 | Esc キー（任意機能） | BBox クリア |
@@ -113,7 +113,7 @@ Sam2Button.active =
 ```
 RemoveForegroundButton.active =
     isLoaded &&
-    !isPlaying &&
+    isPlaying &&
     hasSegmentation &&
     segmentState !== "running" &&
     removeState !== "running"
@@ -122,10 +122,12 @@ RemoveForegroundButton.active =
 | 条件 | 必要理由 |
 |---|---|
 | `isLoaded` | 動画とセッションが必要 |
-| `!isPlaying` | 推論中は再生不可。停止中で揃える |
+| `isPlaying` | SAM2 結果を実際に再生しながら確認した状態でのみ前景削除を打てるようにする（要件） |
 | `hasSegmentation` | サーバ側 MaskStore に直近のマスクがある＝合成 mp4 を表示中（要件 F9） |
 | `segmentState !== "running"` | SAM2 結果待ちの間は前景削除を打てない |
 | `removeState !== "running"` | 同時に複数の前景削除を開始しない |
+
+> SAM2 完了で合成 mp4 が自動再生されるため（[9.3.2](#932-押下時の動作)）、自然な操作の流れでは「結果が再生中 → 削除ボタンが活性」となる。一時停止すると活性条件から外れる。
 
 #### 9.3a.2 押下時の動作
 
@@ -168,16 +170,15 @@ sequenceDiagram
 
     U->>Btn: クリック
     Btn->>Store: runSegment()
-    Store->>Store: segmentState = "running"
-    Store->>Store: bbox = null（送信した値はリクエストに保持）
-    Store->>Pixi: setBboxDisplay(null)
+    Store->>Store: segmentState = "running"（bbox は保持）
     Note over Btn: ボタンは disabled（推論中）
-    Note over Pixi: BBox操作は無効（segmentState=running のため）
+    Note over Pixi: BBox表示は維持。操作は無効（segmentState=running のため）
     Store->>API: POST /segment (frame_idx, bbox)
     API-->>Store: composite mp4 binary（成功）
     Store->>Store: 旧 ObjectURL を revoke、合成 mp4 を ObjectURL 化して videoElement.src に差し替え
-    Store->>Store: canplay 待機後に currentTime と再生状態を復元
-    Store->>Store: segmentState = "idle"
+    Store->>Store: canplay 待機後に currentTime を復元、必ず再生開始
+    Store->>Store: bbox = null、segmentState = "idle"、hasSegmentation = true
+    Note over Pixi: BBox 表示が消える
     Note over Btn: ボタン活性条件再評価
 ```
 
@@ -269,23 +270,23 @@ stateDiagram-v2
 |---|---|
 | `LoadVideoButton` | 常時活性 |
 | `Sam2Button` | `isLoaded && !isPlaying && bbox != null && segmentState != "running" && removeState != "running"` |
-| `RemoveForegroundButton` | `isLoaded && !isPlaying && hasSegmentation && segmentState != "running" && removeState != "running"` |
-| `PlaybackControls.play/pause` | `isLoaded` |
-| `PlaybackControls.step` | `isLoaded && !isPlaying` |
-| `Seekbar` | `isLoaded` |
+| `RemoveForegroundButton` | `isLoaded && isPlaying && hasSegmentation && segmentState != "running" && removeState != "running"` |
+| `PlaybackControls.play/pause` | `isLoaded && segmentState != "running" && removeState != "running"` |
+| `PlaybackControls.step` | `isLoaded && !isPlaying && segmentState != "running" && removeState != "running"` |
+| `Seekbar` | `isLoaded && segmentState != "running" && removeState != "running"` |
 | Pixi BBox 入力 | `isLoaded && !isPlaying && segmentState != "running" && removeState != "running"` |
 
 ## 9.8 実装チェックリスト
 
 - [ ] BBox は再生開始・コマ送り・シーク・動画切替で必ずクリアされる
 - [ ] SAM2 ボタンの活性条件が [9.3.1](#931-活性条件) のとおりに実装されている
-- [ ] SAM2 ボタン押下と同時に BBox がクリアされ、推論中も新規 BBox を描ける
-- [ ] 推論中は SAM2 ボタンが disabled
+- [ ] SAM2 ボタン押下時には BBox を消さず、推論完了時にクリアされる
+- [ ] 推論中は SAM2 ボタンと BBox 入力が disabled
 - [ ] 推論完了で `videoElement.src` が合成動画に差し替わり、古い ObjectURL が revoke される
-- [ ] 差し替え後に再生位置と再生状態が復元される
-- [ ] 推論失敗時にエラー表示が出る
+- [ ] 差し替え後、再生位置を復元したうえで **必ず再生開始** する
+- [ ] 推論失敗時に BBox は残り、エラー表示が出る
 - [ ] 動画ロード前は SAM2 ボタンとシークバーが disabled
-- [ ] `RemoveForegroundButton` は `hasSegmentation` が真かつ非実行中のみ活性
+- [ ] `RemoveForegroundButton` は `hasSegmentation` が真かつ **再生状態** かつ非実行中のみ活性
 - [ ] 前景削除中は SAM2 ボタンと BBox 入力が disabled
 - [ ] 前景削除完了で `videoElement.src` が新 base video に差し替わり、`hasSegmentation = false` に戻る
 - [ ] 前景削除後の動画に対して再度 BBox 指定 → SAM2 → 前景削除のフローが回る
