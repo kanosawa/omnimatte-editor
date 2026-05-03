@@ -32,6 +32,7 @@ imageio[pyav]
 torchdiffeq
 torchsde
 SentencePiece
+protobuf
 ftfy
 func_timeout
 kornia
