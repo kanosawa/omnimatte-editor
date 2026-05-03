@@ -5,6 +5,16 @@ import sys
 import threading
 from contextlib import asynccontextmanager
 
+# SAM backend / Detectron2 / Casper sidecar の各 _load_sync は
+# asyncio.to_thread で並行に走り、各 thread が初回 import を走らせる。
+# Python 3.12 の thread-safe import 強化により、同じ torchvision サブモジュール
+# (e.g. torchvision.ops.roi_align) を複数 thread が同時に import すると
+# `_ModuleLock` deadlock が発生する。メイン thread で先に import を完了させて
+# おけば、後続 thread はキャッシュ hit で済むので deadlock しない。
+import torch  # noqa: F401
+import torchvision  # noqa: F401
+import torchvision.ops  # noqa: F401
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
