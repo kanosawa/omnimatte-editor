@@ -13,9 +13,10 @@ gdown
 # 本サーバ ⇔ Casper sidecar HTTP
 httpx
 
-# Casper sidecar 用（gen-omnimatte-public 依存。gradio / tensorboard / albumentations /
-# ray / flash_attn / xfuser / comfy / hpsv2 / datasets 等の sidecar API で使わない
-# 依存は意図的に除外）
+# Casper sidecar 用（gen-omnimatte-public 依存。gradio / tensorboard / ray /
+# flash_attn / xfuser / comfy / hpsv2 / datasets 等の sidecar API で使わない依存は
+# 意図的に除外。albumentations は dataset_image_video.py が utils 経由で常時 import
+# されるため必須）
 diffusers>=0.30.1
 transformers>=4.46.2
 accelerate>=0.25.0
@@ -41,3 +42,4 @@ matplotlib
 tomesd
 beautifulsoup4
 requests
+albumentations
