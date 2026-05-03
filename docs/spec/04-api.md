@@ -30,6 +30,8 @@
   "status": "ok",
   "model_state": "loading",
   "casper_state": "loading",
+  "detector_state": "loading",
+  "full_fg_state": "empty",
   "session_active": false
 }
 ```
@@ -39,6 +41,8 @@
 | `status` | string | `"ok"` 固定 |
 | `model_state` | string | SAM2 のロード状態。`"loading"` / `"ready"` / `"failed"` |
 | `casper_state` | string | Casper sidecar のロード状態。`"loading"` / `"ready"` / `"failed"` / `"unreachable"`（sidecar に接続できない） |
+| `detector_state` | string | Detectron2 (COCO Mask R-CNN) のロード状態。`"loading"` / `"ready"` / `"failed"` |
+| `full_fg_state` | string | 全前景抽出（R-CNN + SAM2 propagation）の状態。`"empty"`（未開始）/ `"loading"`（バックグラウンド実行中）/ `"ready"` / `"failed"` |
 | `session_active` | boolean | 現在セッションが存在するか（バックエンドは常に最大1件） |
 
 ### 用途
