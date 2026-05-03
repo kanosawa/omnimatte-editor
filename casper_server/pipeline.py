@@ -21,6 +21,9 @@ from server.model import (
     CASPER_REPO_DIR,
     CASPER_TEMPORAL_WINDOW_SIZE,
     CASPER_TRANSFORMER_PATH,
+    FG_REPLACE_DIFF_THRESHOLD,
+    FG_REPLACE_MASK_DILATE,
+    FOREGROUND_ONLY_REPLACE,
 )
 
 
@@ -243,29 +246,46 @@ def run_one_seq(
     save_video_name = f"{seq_name}-fg=" + "_".join([f"{i:02d}" for i in keep_fg_ids])
     prefix = save_video_name + f"-{uuid.uuid4().hex[:8]}"
     video_path = os.path.join(save_dir, prefix + ".mp4")
-    _save_video_high_quality(sample, video_path, fps=cfg.data.fps)
+
+    if FOREGROUND_ONLY_REPLACE:
+        # 前景部分のみ Casper 出力で書き換え、それ以外は base video の画素を保持。
+        # 判定マスク = (SAM2 マスクを dilate) AND (Casper-base の per-pixel diff > 閾値)（案 D）
+        casper_frames = _tensor_to_uint8_rgb_frames(sample)
+        composite_frames = _compose_foreground_only(
+            casper_frames=casper_frames,
+            input_video_path=os.path.join(seq_dir, "input_video.mp4"),
+            mask_video_path=os.path.join(seq_dir, "mask_00.mp4"),
+            diff_threshold=FG_REPLACE_DIFF_THRESHOLD,
+            mask_dilate=FG_REPLACE_MASK_DILATE,
+        )
+        _save_uint8_frames_high_quality(composite_frames, video_path, fps=cfg.data.fps)
+    else:
+        _save_video_high_quality(sample, video_path, fps=cfg.data.fps)
     return video_path
 
 
-def _save_video_high_quality(sample, path: str, fps: float) -> None:
-    """`(B, C, T, H, W)` のテンソル（[0, 1]）を H.264 / yuv420p / crf 15 で mp4 に書き出す。
+def _tensor_to_uint8_rgb_frames(sample) -> list[np.ndarray]:
+    """`(B, C, T, H, W)` のテンソル（[0, 1]）を `(H, W, 3)` uint8 RGB フレーム列に変換。
 
-    `videox_fun.utils.utils.save_videos_grid` が `imageio.mimsave()` をデフォルト
-    引数で呼ぶため出力 mp4 のビットレートが低い。本関数は同じテンソル変換ロジックで
-    エンコードパラメータだけ高品質側に振った差し替え版。
+    `videox_fun.utils.utils.save_videos_grid` のテンソル変換ロジックを抜き出したもの。
     """
-    import imageio
     import torchvision
     from einops import rearrange
     from PIL import Image
 
     videos = rearrange(sample, "b c t h w -> t b c h w")
-    frames = []
+    frames: list[np.ndarray] = []
     for x in videos:
         x = torchvision.utils.make_grid(x, nrow=6)
         x = x.transpose(0, 1).transpose(1, 2).squeeze(-1)
         x = (x * 255).numpy().astype(np.uint8)
         frames.append(np.array(Image.fromarray(x)))
+    return frames
+
+
+def _save_uint8_frames_high_quality(frames, path: str, fps: float) -> None:
+    """RGB uint8 フレーム列を H.264 / yuv420p / crf 15 で mp4 に書き出す。"""
+    import imageio
 
     imageio.mimsave(
         path,
@@ -280,3 +300,129 @@ def _save_video_high_quality(sample, path: str, fps: float) -> None:
             "-pix_fmt", "yuv420p", # 互換性確保
         ],
     )
+
+
+def _save_video_high_quality(sample, path: str, fps: float) -> None:
+    """`(B, C, T, H, W)` のテンソル（[0, 1]）を高品質 mp4 に書き出す（後方互換ラッパ）。"""
+    frames = _tensor_to_uint8_rgb_frames(sample)
+    _save_uint8_frames_high_quality(frames, path, fps)
+
+
+def _compose_foreground_only(
+    casper_frames: list[np.ndarray],
+    input_video_path: str,
+    mask_video_path: str,
+    diff_threshold: int,
+    mask_dilate: int,
+) -> list[np.ndarray]:
+    """Casper 出力フレームと base video を、判定マスクに基づいて合成する。
+
+    判定マスク = (SAM2 マスクを `mask_dilate` ピクセル dilate) AND
+                 (Casper と base の per-channel max diff > `diff_threshold`)
+
+    判定マスクが立っている画素 → Casper 出力で書き換え
+    判定マスクが立っていない画素 → base video の画素を保持
+
+    引数:
+      `casper_frames`: list of `(H, W, 3)` uint8 RGB（`_tensor_to_uint8_rgb_frames` の出力）
+      `input_video_path`: base video の絶対パス
+      `mask_video_path`: SAM2 が生成したバイナリマスク mp4（白=対象前景）
+      `diff_threshold`: 0-255 の per-channel 差分しきい値
+      `mask_dilate`: SAM2 マスクの dilate 半径ピクセル
+
+    戻り値: list of `(H_base, W_base, 3)` uint8 RGB。base video 解像度に揃えて返す。
+    """
+    import cv2
+
+    # 1. base video を全フレーム RGB で読み込む
+    base_frames = _decode_video_rgb(input_video_path)
+    if not base_frames:
+        raise RuntimeError(f"failed to decode base video: {input_video_path}")
+    base_h, base_w = base_frames[0].shape[:2]
+
+    # 2. SAM2 マスクを bool で読み込み（白=前景）
+    sam2_masks = _decode_video_mask(mask_video_path)
+
+    # 3. フレーム数を揃える（最小に切る）
+    n = min(len(casper_frames), len(base_frames), len(sam2_masks))
+    if n == 0:
+        raise RuntimeError("no frames to compose")
+
+    # 4. dilate カーネル（楕円）
+    dilate_kernel = None
+    if mask_dilate > 0:
+        k = 2 * mask_dilate + 1
+        dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+
+    out: list[np.ndarray] = []
+    for i in range(n):
+        casper_frame = casper_frames[i]
+        base_frame = base_frames[i]
+        sam2_mask = sam2_masks[i]
+
+        # Casper を base 解像度に合わせる（解像度ミスマッチがある場合）
+        if casper_frame.shape[:2] != (base_h, base_w):
+            casper_frame = cv2.resize(
+                casper_frame, (base_w, base_h), interpolation=cv2.INTER_LINEAR
+            )
+
+        # SAM2 マスクを base 解像度に合わせて dilate
+        if sam2_mask.shape != (base_h, base_w):
+            sam2_mask = cv2.resize(
+                sam2_mask.astype(np.uint8), (base_w, base_h), interpolation=cv2.INTER_NEAREST
+            ) > 0
+        if dilate_kernel is not None:
+            sam2_mask = cv2.dilate(sam2_mask.astype(np.uint8), dilate_kernel, iterations=1) > 0
+
+        # diff > threshold（per-channel max）
+        diff = np.abs(casper_frame.astype(np.int16) - base_frame.astype(np.int16)).max(axis=-1)
+        diff_mask = diff > diff_threshold
+
+        # 案 D: AND
+        modified = sam2_mask & diff_mask
+
+        # 合成
+        composite = base_frame.copy()
+        composite[modified] = casper_frame[modified]
+        out.append(composite)
+
+    return out
+
+
+def _decode_video_rgb(path: str) -> list[np.ndarray]:
+    """mp4 を全フレーム RGB (H, W, 3) uint8 として読み込む。"""
+    import cv2
+
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return []
+    frames: list[np.ndarray] = []
+    try:
+        while True:
+            ret, frame_bgr = cap.read()
+            if not ret or frame_bgr is None:
+                break
+            frames.append(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+    finally:
+        cap.release()
+    return frames
+
+
+def _decode_video_mask(path: str) -> list[np.ndarray]:
+    """マスク mp4 を全フレーム bool (H, W) として読み込む。白(>127)=前景。"""
+    import cv2
+
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return []
+    frames: list[np.ndarray] = []
+    try:
+        while True:
+            ret, frame_bgr = cap.read()
+            if not ret or frame_bgr is None:
+                break
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            frames.append(gray > 127)
+    finally:
+        cap.release()
+    return frames
