@@ -18,6 +18,7 @@ import sys
 
 
 REPO_ID = "AEmotionStudio/sam3"
+REPO_URL = "https://github.com/facebookresearch/sam3"
 WEIGHT_FILE = "sam3.safetensors"
 
 
@@ -34,10 +35,25 @@ def ensure_submodule(root: str) -> None:
     sam3_dir = os.path.join(root, "vendor", "sam3")
     sentinel = os.path.join(sam3_dir, "pyproject.toml")
     if os.path.exists(sentinel):
-        print(f"[ok] vendor/sam3 already initialized at {sam3_dir}")
+        print(f"[ok] vendor/sam3 already present at {sam3_dir}")
         return
-    print("[setup] initializing vendor/sam3 submodule...")
-    _run(["git", "submodule", "update", "--init", "vendor/sam3"], cwd=root)
+
+    # 1. submodule として登録済みなら update --init で取得
+    print("[setup] trying git submodule update --init vendor/sam3...")
+    result = subprocess.run(
+        ["git", "submodule", "update", "--init", "vendor/sam3"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if result.returncode == 0 and os.path.exists(sentinel):
+        print(f"[ok] vendor/sam3 initialized via submodule")
+        return
+    if result.stderr:
+        print(result.stderr.rstrip())
+
+    # 2. 未登録（.gitmodules にエントリはあるが gitlink が無い等）なら直接 clone
+    print("[setup] submodule not registered; cloning vendor/sam3 directly...")
+    os.makedirs(os.path.dirname(sam3_dir), exist_ok=True)
+    _run(["git", "clone", REPO_URL, sam3_dir], cwd=root)
 
 
 def pip_install_sam3(root: str) -> None:
