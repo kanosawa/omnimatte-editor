@@ -54,6 +54,8 @@ async def remove_foreground() -> Response:
             base_video_path=base_video_path,
             masks=record.masks,
             fps=fps,
+            width=session.width,
+            height=session.height,
         )
     except CasperUnreachableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))

@@ -19,7 +19,8 @@ CASPER_TRANSFORMER_PATH = os.path.join(
     CASPER_REPO_DIR, "models", "Casper", "wan2.1_fun_1.3b_casper.safetensors"
 )
 CASPER_CONFIG_PATH = "config/default_wan.py"  # CASPER_REPO_DIR からの相対
-CASPER_SAMPLE_SIZE = "288x480"
+# 推論解像度は固定値ではなく、リクエストごとに base video の解像度から動的に決定する
+# （sidecar 側で 16 の倍数に丸める）
 CASPER_FPS = 8
 CASPER_NUM_INFERENCE_STEPS = 1
 CASPER_TEMPORAL_WINDOW_SIZE = 21

@@ -20,10 +20,23 @@ logger = logging.getLogger(__name__)
 _run_lock = asyncio.Lock()
 
 
+def _round_to_multiple_of_16(value: int) -> int:
+    """Wan2.1 の VAE (8x) + transformer patch (2x) 制約に合わせ、16 の倍数に丸める。
+
+    最近傍に丸める。最小値は 16。
+    """
+    if value <= 0:
+        raise ValueError(f"invalid dimension: {value}")
+    snapped = int(round(value / 16.0)) * 16
+    return max(16, snapped)
+
+
 @router.post("/run")
 async def run(
     input_video: UploadFile = File(...),
     mask: UploadFile = File(...),
+    width: int = Form(...),
+    height: int = Form(...),
     prompt: str = Form(CASPER_DEFAULT_PROMPT),
     fps: str = Form(""),  # 参考用（cfg.data.fps を使うため未使用）
 ) -> Response:
@@ -37,6 +50,18 @@ async def run(
     # 既に処理中なら 409。待たせない（仕様 §3.10.5）
     if _run_lock.locked():
         raise HTTPException(status_code=409, detail="another run is in progress")
+
+    # 元動画の解像度を 16 の倍数に丸めて推論サイズとする
+    try:
+        snap_h = _round_to_multiple_of_16(height)
+        snap_w = _round_to_multiple_of_16(width)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    sample_size = (snap_h, snap_w)
+    logger.info(
+        "casper run: input=%dx%d -> sample_size=%dx%d",
+        width, height, snap_w, snap_h,
+    )
 
     async with _run_lock:
         work_root = tempfile.mkdtemp(prefix="casper_run_")
@@ -69,6 +94,7 @@ async def run(
                     casper_holder.generator,
                     seq_dir,
                     save_dir,
+                    sample_size,
                 )
             except Exception as exc:
                 logger.exception("casper run failed")

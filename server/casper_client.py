@@ -50,8 +50,13 @@ async def run_casper(
     base_video_path: str,
     masks: np.ndarray,
     fps: float,
+    width: int,
+    height: int,
 ) -> bytes:
     """sidecar の POST /run を呼び、前景削除済み mp4 バイナリを返す。
+
+    `width / height` は base video の解像度（ピクセル）。sidecar 側で
+    16 の倍数に丸めて推論サイズに使う。
 
     呼び出し側は接続失敗・busy・推論失敗を例外で受け取り、適切な HTTP ステータスに変換する。
     マスク mp4 の一時ファイルは関数内で作成・削除する。
@@ -75,6 +80,8 @@ async def run_casper(
                     data = {
                         "prompt": CASPER_DEFAULT_PROMPT,
                         "fps": str(fps),
+                        "width": str(width),
+                        "height": str(height),
                     }
                     res = await client.post(url, files=files, data=data)
         except (httpx.ConnectError, httpx.ConnectTimeout, OSError) as exc:

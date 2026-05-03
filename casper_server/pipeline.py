@@ -20,7 +20,6 @@ from server.model import (
     CASPER_MATTING_MODE,
     CASPER_NUM_INFERENCE_STEPS,
     CASPER_REPO_DIR,
-    CASPER_SAMPLE_SIZE,
     CASPER_TEMPORAL_WINDOW_SIZE,
     CASPER_TRANSFORMER_PATH,
 )
@@ -42,10 +41,9 @@ def build_default_config():
     from config.default_wan import get_config
 
     cfg = get_config()
-    # 本仕様の上書き値
+    # 本仕様の上書き値（sample_size はリクエスト毎に run_one_seq で上書き）
     cfg.experiment.matting_mode = CASPER_MATTING_MODE
     cfg.experiment.skip_if_exists = False
-    cfg.data.sample_size = CASPER_SAMPLE_SIZE
     cfg.data.fps = CASPER_FPS
     cfg.video_model.transformer_path = CASPER_TRANSFORMER_PATH
     cfg.video_model.num_inference_steps = CASPER_NUM_INFERENCE_STEPS
@@ -179,11 +177,23 @@ def load_pipeline(cfg):
 
 
 @torch.no_grad()
-def run_one_seq(cfg, pipeline, vae, generator, seq_dir: str, save_dir: str) -> str:
+def run_one_seq(
+    cfg,
+    pipeline,
+    vae,
+    generator,
+    seq_dir: str,
+    save_dir: str,
+    sample_size: tuple[int, int],
+) -> str:
     """1 シーケンスについて Casper を走らせ、出力 mp4 のパスを返す。
 
     `seq_dir` には `input_video.mp4`, `mask_00.mp4`, `prompt.json` が
     既に配置されている必要がある（呼び出し側で準備）。
+
+    `sample_size` は `(height, width)` の int タプル。両次元とも 16 の倍数で
+    なければならない（Wan2.1 の VAE / patch サイズ制約）。呼び出し側で
+    丸めること。
     """
     _ensure_repo_on_path()
 
@@ -199,8 +209,6 @@ def run_one_seq(cfg, pipeline, vae, generator, seq_dir: str, save_dir: str) -> s
             * vae.config.temporal_compression_ratio) + 1
         if video_length != 1 else 1
     )
-    sample_size = cfg.data.sample_size
-    sample_size = (int(sample_size.split('x')[0]), int(sample_size.split('x')[1]))
 
     keep_fg_ids = [-1]  # all_fg
 
