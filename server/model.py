@@ -13,12 +13,13 @@ SAM2_CFG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 SAM2_CKPT = os.path.join(_sam2_dir, "checkpoints/sam2.1_hiera_large.pt")
 SAM2_DEVICE = "cuda"
 
-# Casper（gen-omnimatte-public）関連の設定。本サーバ・sidecar の双方から参照する
+# Casper（gen-omnimatte-public, Wan2.1-Fun-1.3B-InP）関連の設定。
+# 本サーバ・sidecar の双方から参照する
 CASPER_REPO_DIR = os.path.join(_project_root, "vendor", "gen-omnimatte-public")
-
-# 使用するバックエンド。"wan" | "cogvideox"
-CASPER_BACKEND = "cogvideox"
-
+CASPER_TRANSFORMER_PATH = os.path.join(
+    CASPER_REPO_DIR, "models", "Casper", "wan2.1_fun_1.3b_casper.safetensors"
+)
+CASPER_CONFIG_PATH = "config/default_wan.py"  # CASPER_REPO_DIR からの相対
 # 推論解像度は固定値ではなく、リクエストごとに base video の解像度から動的に決定する
 # （sidecar 側で 16 の倍数に丸める）
 CASPER_FPS = 8
@@ -26,31 +27,6 @@ CASPER_NUM_INFERENCE_STEPS = 1
 CASPER_TEMPORAL_WINDOW_SIZE = 21
 CASPER_MATTING_MODE = "all_fg"
 CASPER_DEFAULT_PROMPT = "a clean background video."
-
-# バックエンド別の設定（重みパス・ベース config）。CASPER_BACKEND の値で 1 つ選ぶ
-_CASPER_BACKENDS = {
-    "wan": {
-        "transformer_path": os.path.join(
-            CASPER_REPO_DIR, "models", "Casper", "wan2.1_fun_1.3b_casper.safetensors"
-        ),
-        "config_path": "config/default_wan.py",  # CASPER_REPO_DIR からの相対
-    },
-    "cogvideox": {
-        "transformer_path": os.path.join(
-            CASPER_REPO_DIR, "models", "Casper", "cogvideox_5b_casper.safetensors"
-        ),
-        "config_path": "config/default_cogvideox.py",
-    },
-}
-
-if CASPER_BACKEND not in _CASPER_BACKENDS:
-    raise ValueError(
-        f"unknown CASPER_BACKEND: {CASPER_BACKEND!r} "
-        f"(must be one of {list(_CASPER_BACKENDS)})"
-    )
-
-CASPER_TRANSFORMER_PATH = _CASPER_BACKENDS[CASPER_BACKEND]["transformer_path"]
-CASPER_CONFIG_PATH = _CASPER_BACKENDS[CASPER_BACKEND]["config_path"]
 
 # sidecar との通信制御（環境変数でオーバーライド可）
 CASPER_PORT = int(os.environ.get("OMNIMATTE_CASPER_PORT", "8765"))
