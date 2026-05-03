@@ -28,6 +28,14 @@ CASPER_TEMPORAL_WINDOW_SIZE = 21
 CASPER_MATTING_MODE = "all_fg"
 CASPER_DEFAULT_PROMPT = "a clean background video."
 
+# Detectron2 (COCO Mask R-CNN) 関連の設定
+DETECTRON2_CONFIG = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
+DETECTRON2_DEVICE = "cuda"
+DETECTRON2_SCORE_THRESH = 0.5
+DETECTRON2_MAX_DETECTIONS = 5      # 検出数の上限（area 降順で上位）
+DETECTRON2_MIN_AREA_RATIO = 0.001  # 画像面積の 0.1% 未満は誤検出として弾く
+DETECTRON2_IOU_WITH_TARGET = 0.3   # 対象前景との IoU がこれを超えた検出は対象本人として除外
+
 # 前景部分のみ Casper 出力で書き換える後処理（sidecar 内で実行）。
 # OFF にすると Casper の出力 mp4 をそのまま返す（デバッグ・品質比較用）
 FOREGROUND_ONLY_REPLACE = os.environ.get("OMNIMATTE_FOREGROUND_ONLY_REPLACE", "0") != "0"

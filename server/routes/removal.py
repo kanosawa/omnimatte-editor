@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import tempfile
@@ -11,6 +12,7 @@ from server.casper_client import (
     CasperUnreachableError,
     run_casper,
 )
+from server.full_foreground_store import full_foreground_store
 from server.mask_store import mask_store
 from server.model import SAM2_DEVICE, model_holder
 from server.session import session_slot
@@ -52,7 +54,7 @@ async def remove_foreground() -> Response:
     try:
         mp4_bytes = await run_casper(
             base_video_path=base_video_path,
-            masks=record.masks,
+            trimask=record.trimask,
             fps=fps,
             width=session.width,
             height=session.height,
@@ -94,7 +96,7 @@ async def remove_foreground() -> Response:
             detail="failed to reinitialize SAM2 state on new base video",
         )
 
-    session_slot.swap_base_video(
+    new_session = session_slot.swap_base_video(
         new_base_video_path=new_video_path,
         new_inference_state=new_inference_state,
         width=new_meta.width,
@@ -103,5 +105,11 @@ async def remove_foreground() -> Response:
         num_frames=new_meta.num_frames,
     )
     mask_store.clear()
+
+    # base video が差し替わったので、全前景データも再生成する。
+    # ここで再 propagate を待たない: lazy に /segment が wait_ready する。
+    full_foreground_store.start_loading()
+    from server.routes.session import _extract_full_foreground  # 循環 import 回避のため遅延 import
+    asyncio.create_task(_extract_full_foreground(new_session))
 
     return Response(content=mp4_bytes, media_type="video/mp4")

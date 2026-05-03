@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 @router.post("/preload", status_code=202)
 async def preload(
     input_video: UploadFile = File(...),
-    mask: UploadFile = File(...),
+    trimask: UploadFile = File(...),
     width: int = Form(...),
     height: int = Form(...),
     prompt: str = Form(CASPER_DEFAULT_PROMPT),
@@ -36,19 +36,19 @@ async def preload(
     """
     work_root = tempfile.mkdtemp(prefix="casper_preload_")
     input_video_path = os.path.join(work_root, "input_video.mp4")
-    mask_path = os.path.join(work_root, "mask_00.mp4")
+    trimask_path = os.path.join(work_root, "trimask_00.mp4")
 
     try:
         with open(input_video_path, "wb") as f:
             shutil.copyfileobj(input_video.file, f)
-        with open(mask_path, "wb") as f:
-            shutil.copyfileobj(mask.file, f)
+        with open(trimask_path, "wb") as f:
+            shutil.copyfileobj(trimask.file, f)
     except Exception:
         shutil.rmtree(work_root, ignore_errors=True)
         raise
 
     asyncio.create_task(
-        _do_preload_background(work_root, input_video_path, mask_path, width, height, prompt)
+        _do_preload_background(work_root, input_video_path, trimask_path, width, height, prompt)
     )
     return {"status": "accepted"}
 
@@ -56,7 +56,7 @@ async def preload(
 async def _do_preload_background(
     work_root: str,
     input_video_path: str,
-    mask_path: str,
+    trimask_path: str,
     width: int,
     height: int,
     prompt: str,
@@ -68,14 +68,14 @@ async def _do_preload_background(
             return
 
         video_hash = hash_file(input_video_path)
-        mask_hash = hash_file(mask_path)
-        if output_cache.get(video_hash, mask_hash) is not None:
+        trimask_hash = hash_file(trimask_path)
+        if output_cache.get(video_hash, trimask_hash) is not None:
             logger.info("preload skipped: already cached")
             return
 
         async with run_lock:
             # lock 取得後に再 check
-            if output_cache.get(video_hash, mask_hash) is not None:
+            if output_cache.get(video_hash, trimask_hash) is not None:
                 logger.info("preload skipped (after lock): already cached")
                 return
 
@@ -84,7 +84,7 @@ async def _do_preload_background(
                 mp4_bytes = await asyncio.to_thread(
                     do_pipeline_run,
                     input_video_path,
-                    mask_path,
+                    trimask_path,
                     width,
                     height,
                     prompt,
@@ -93,7 +93,7 @@ async def _do_preload_background(
                 logger.exception("preload pipeline failed (silently swallowed)")
                 return
 
-            output_cache.set(video_hash, mask_hash, mp4_bytes)
+            output_cache.set(video_hash, trimask_hash, mp4_bytes)
             logger.info("preload complete: cached %d bytes", len(mp4_bytes))
     finally:
         shutil.rmtree(work_root, ignore_errors=True)

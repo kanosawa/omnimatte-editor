@@ -13,6 +13,12 @@ gdown
 # 本サーバ ⇔ Casper sidecar HTTP
 httpx
 
+# 物体検出（COCO Mask R-CNN）。pip での直接インストールは git+ URL 経由。
+# Detectron2 の setup.py は import 時に torch を要求するため、build isolation を切る必要がある
+# （torch は本 requirements.txt の他依存で既に入っている前提）:
+#   pip install --upgrade pip setuptools wheel ninja
+#   pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
+
 # Casper sidecar 用（gen-omnimatte-public 依存。gradio / tensorboard / ray /
 # flash_attn / xfuser / comfy / hpsv2 / datasets 等の sidecar API で使わない依存は
 # 意図的に除外。albumentations は dataset_image_video.py が utils 経由で常時 import

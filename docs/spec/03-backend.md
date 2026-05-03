@@ -23,21 +23,23 @@ sidecar は本サーバの lifespan が自動 spawn する。フロントから 
 [02-architecture.md](02-architecture.md#22-ディレクトリ構成) の `server/` を参照。
 
 ```
-server/                # 本サーバ
-├── __init__.py        # 空
-├── main.py            # FastAPI 起動、ルータ登録、CORS、lifespan で SAM2 ロード + sidecar spawn
-├── model.py           # SAM2 のロード状態管理 + SAM2 / Casper 設定値
-├── session.py         # セッションスロット（base_video_path / inference_state）+ swap_base_video
-├── mask_store.py      # 直近 SAM2 マスクの単一スロット
-├── casper_client.py   # sidecar への HTTP クライアント（httpx）
-├── video_io.py        # mp4 デコード、合成 mp4 エンコード、マスク → mp4 エンコード
+server/                       # 本サーバ
+├── __init__.py               # 空
+├── main.py                   # FastAPI 起動、CORS、lifespan で SAM2 / Detectron2 ロード + sidecar spawn
+├── model.py                  # SAM2 / Casper / Detectron2 設定値
+├── session.py                # セッションスロット（base_video_path / inference_state）+ swap_base_video
+├── mask_store.py             # 直近 trimask の単一スロット（/remove で sidecar に渡す）
+├── full_foreground_store.py  # base video 全体の全前景マスク（R-CNN + SAM2 propagation 結果）
+├── detector.py               # Detectron2 (COCO Mask R-CNN) ホルダ。class-agnostic 検出
+├── casper_client.py          # sidecar への HTTP クライアント（httpx）
+├── video_io.py               # mp4 デコード、合成 mp4 エンコード、trimask → mp4 エンコード、フレーム抽出
 ├── routes/
 │   ├── __init__.py
 │   ├── health.py
 │   ├── session.py
 │   ├── segment.py
 │   └── removal.py
-└── schemas.py         # Pydantic スキーマ
+└── schemas.py                # Pydantic スキーマ
 
 casper_server/             # Casper sidecar
 ├── __init__.py            # 空
@@ -62,6 +64,12 @@ casper_server/             # Casper sidecar
 | `SAM2_CFG` | `configs/sam2.1/sam2.1_hiera_l.yaml` | SAM2 設定ファイル（hydra で解決） |
 | `SAM2_CKPT` | `<project_root>/vendor/sam2/checkpoints/sam2.1_hiera_large.pt` | チェックポイントの絶対パス（`__file__` 起点で解決） |
 | `SAM2_DEVICE` | `cuda` | 推論デバイス |
+| `DETECTRON2_CONFIG` | `COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml` | COCO Mask R-CNN の config（model_zoo 指定） |
+| `DETECTRON2_DEVICE` | `cuda` | 検出推論デバイス |
+| `DETECTRON2_SCORE_THRESH` | `0.5` | 検出スコアのしきい値（COCO 既定） |
+| `DETECTRON2_MAX_DETECTIONS` | `5` | 検出物体の上限。area 降順で上位 N 個を採用 |
+| `DETECTRON2_MIN_AREA_RATIO` | `0.001` | 画像面積の 0.1% 未満は誤検出として除外 |
+| `DETECTRON2_IOU_WITH_TARGET` | `0.3` | 対象前景との IoU がこれを超えた検出は対象本人として除外 |
 
 Casper（前景削除）関連の値はハードコードで、本サーバ・sidecar の双方から `server/model.py` を import して参照する。
 
@@ -315,25 +323,35 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 
 ### 3.7.1 `/session` の処理フロー
 
-1. `wait_ready(5.0)` でモデルロード完了を待ち合わせ
+1. `wait_ready(5.0)` で SAM2 のロード完了を待ち合わせ
 2. multipart で受け取った mp4 を一時ファイルに保存
 3. `probe_video()` でメタ情報を取得
 4. `predictor.init_state(video_path=...)` で `inference_state` 構築
 5. `SessionSlot.replace()` で旧セッションを破棄しつつ新規 `Session` をスロットに配置
-6. `videoMeta` を JSON で返す（Pydantic の `alias_generator=to_camel` により snake_case の Python 属性が camelCase に変換される）
+6. `mask_store.clear()`、`full_foreground_store.start_loading()`
+7. **バックグラウンドタスク** として全前景抽出を起動（`asyncio.create_task`）。後述 [3.7.4](#374-全前景抽出のバックグラウンド処理)
+8. `videoMeta` を JSON で返す（Pydantic の `alias_generator=to_camel` により snake_case の Python 属性が camelCase に変換される）
+
+`/session` 自体は全前景抽出の完了を待たない。後続の `/segment` が `full_foreground_store.wait_ready()` で待機する。
 
 ### 3.7.2 `/segment` の処理フロー
 
-1. `wait_ready(5.0)` でモデルロード完了を待ち合わせ
+1. `wait_ready(5.0)` で SAM2 のロード完了を待ち合わせ
 2. `SessionSlot.current()` で現在のセッションを取得（無ければ 409）
 3. `frame_idx` の範囲チェック（無効なら 422）
-4. `predictor.reset_state(state)` で前回結果をクリア
-5. `predictor.add_new_points_or_box(frame_idx, obj_id=0, box=...)`
-6. 順方向と逆方向の `propagate_in_video` を実行し、フレーム別マスクを取得
-7. SAM2 が生成しなかったフレームは全 False（マスクなし）の配列で埋めて `masks_in_order` を作成
-8. `MaskStore.set(MaskRecord(masks=stack(masks_in_order), base_video_path=session.base_video_path, fps=session.fps, ...))` でマスクを保存
-9. `composite_overlay_to_mp4()` で base video＋マスク半透明合成 mp4 を作成（fps はセッションから取得）
-10. mp4 バイナリを `video/mp4` で返す
+4. **`full_foreground_store.wait_ready(timeout=600.0)` で全前景抽出の完了を待機**（バックグラウンドで進行中の場合あり）
+5. `predictor.reset_state(state)` で前回結果をクリア
+6. `predictor.add_new_points_or_box(frame_idx, obj_id=0, box=...)`
+7. 順方向と逆方向の `propagate_in_video` を実行し、フレーム別マスク `masks_target (T,H,W) bool` を取得
+8. **R-CNN 検出物体から対象を除外**: 各 R-CNN 物体について `IoU(target_at_frame_idx, obj_at_frame_idx) > DETECTRON2_IOU_WITH_TARGET` ならスキップ。残りを OR して `other_fg_combined (T,H,W) bool`
+9. **trimask 構築** (`(T, H, W) uint8`、Casper の trimask 規約に合わせた値):
+   - 既定: `128`（neutral / 背景）
+   - `other_fg_combined & ~masks_target`: `255`（keep / 他の前景）
+   - `masks_target`: `0`（remove / 対象前景）
+10. `MaskStore.set(trimask=trimask, base_video_path=session.base_video_path, fps=session.fps)`
+11. `composite_overlay_to_mp4()` で base video＋対象マスク半透明合成 mp4 を作成（fps はセッションから取得）
+12. **`asyncio.create_task(preload_casper(...))`** で sidecar に先回り推論を依頼（投げ捨て）
+13. mp4 バイナリを `video/mp4` で返す
 
 順方向＋逆方向の伝播は参照実装と同じ。
 
@@ -341,9 +359,9 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 
 1. `model_holder.wait_ready(5.0)` で SAM2 ロード完了を待ち合わせ
 2. `SessionSlot.current()` でセッション取得（無ければ 409: `no active session`）
-3. `MaskStore.current()` でマスク取得（無ければ 409: `no segmentation result available`）
-4. マスクの `base_video_path` が現在のセッションの `base_video_path` と一致することを確認（不一致なら 409: `mask is stale`）
-5. `casper_client.run_casper(base_video_path, masks, fps)` を呼び、sidecar の `POST /run` を待つ
+3. `MaskStore.current()` で trimask 取得（無ければ 409: `no segmentation result available`）
+4. trimask の `base_video_path` が現在のセッションの `base_video_path` と一致することを確認（不一致なら 409: `mask is stale`）
+5. `casper_client.run_casper(base_video_path, trimask, fps, width, height)` を呼び、sidecar の `POST /run` を待つ（cache hit なら即返る）
    - `CasperUnreachableError` → 503 `casper sidecar unreachable`
    - `CasperBusyError` → 409 `another removal is in progress`
    - `CasperRunError` → 500 `casper run failed: ...`
@@ -351,12 +369,33 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 7. `probe_video()` でメタ情報を取得
 8. `predictor.init_state(new_base_video_path)` で `inference_state` を再構築
 9. `SessionSlot.swap_base_video(new_base_video_path, new_inference_state, ...)` でベース動画を差し替え。内部で旧 base video を削除する
-10. `MaskStore.clear()` でマスクを破棄
-11. 出力 mp4 をバイナリで返す（`video/mp4`）
+10. `MaskStore.clear()` で trimask を破棄
+11. **`full_foreground_store.start_loading()` + バックグラウンドで全前景抽出を再起動**（新しい base video に対する R-CNN + propagate）
+12. 出力 mp4 をバイナリで返す（`video/mp4`）
 
 > **注**: 同じセッションでベース動画を差し替えるため、フロントエンドからは `/session` を呼び直さない。`/remove` レスポンスがそのまま新しい base video として扱われる。
 >
 > Casper の重みファイル不在チェックは sidecar 側のロード時に行う（不在なら sidecar の `casper_state` が `failed` になり、本サーバの `/remove` は 503 を返す）。
+
+### 3.7.4 全前景抽出のバックグラウンド処理
+
+`/session` 完了直後と `/remove` 完了直後に、現在の base video に対して以下のバックグラウンドタスクが起動する。
+
+```mermaid
+flowchart TB
+    A[base_video_path 確定] --> B["detector_holder.wait_ready(30s)"]
+    B --> C["中間フレーム読込: read_frame_at(base_video_path, num_frames//2)"]
+    C --> D["Detectron2 で検出 (class-agnostic)<br/>area 降順で上位 DETECTRON2_MAX_DETECTIONS 個"]
+    D --> E{検出数}
+    E -- 0 --> F["full_foreground_store.set_ready(per_object_masks=[])"]
+    E -- "1+" --> G["SAM2: 各 mask を add_new_mask + propagate (順方向 + 逆方向)"]
+    G --> H["predictor.reset_state (segment 用にクリア)"]
+    H --> I["full_foreground_store.set_ready(per_object_masks=[per-frame masks])"]
+```
+
+失敗時は `full_foreground_store.set_failed(error)` に遷移し、後続の `/segment` は 503 を返す。
+
+`/segment` 側は `wait_ready(timeout=600s)` でこの完了を待つ。バックグラウンド処理が走っている最中に `/segment` が来た場合、自然に待機する。
 
 `/segment` 側は `wait_ready(timeout=600s)` でこの完了を待つ。バックグラウンド処理が走っている最中に `/segment` が来た場合、自然に待機する。
 
@@ -367,6 +406,9 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 | モデルロード未完了でタイムアウト | 503 | `model not ready (timeout)` |
 | モデルロード失敗 | 503 | `model failed to load: <message>` |
 | `/segment` または `/remove` 時にセッションが存在しない | 409 | `no active session` |
+| `/segment` 時に全前景抽出が未完了でタイムアウト | 503 | `full foreground extraction not ready (timeout)` |
+| `/segment` 時に全前景抽出が失敗 | 503 | `full foreground extraction failed: ...` |
+| `/segment` 時に全前景データが古い base video のもの | 409 | `full foreground data is stale` |
 | `/remove` 時に SAM2 結果が手元にない | 409 | `no segmentation result available` |
 | `/remove` 時に保持マスクが古い base video のもの | 409 | `mask is stale` |
 | `/remove` 時に sidecar に接続できない | 503 | `casper sidecar unreachable` |
@@ -493,7 +535,7 @@ flowchart TB
 | パス | メソッド | 概要 |
 |---|---|---|
 | `/health` | GET | sidecar 稼働確認 + Casper ロード状態 |
-| `/run` | POST (multipart) | input_video.mp4 + mask_00.mp4 + form fields → 前景削除済み mp4。**output_cache に hit すれば即返す** |
+| `/run` | POST (multipart) | input_video.mp4 + trimask_00.mp4 + form fields → 前景削除済み mp4。**output_cache に hit すれば即返す** |
 | `/preload` | POST (multipart) | `/run` と同じ multipart を受け、即 `202 Accepted`。バックグラウンドで pipeline を回し `output_cache` に保存 |
 
 #### `/health`
@@ -512,7 +554,7 @@ Request (`multipart/form-data`):
 | フィールド | 型 | 説明 |
 |---|---|---|
 | `input_video` | mp4 binary | base video |
-| `mask` | mp4 binary | 白=前景、黒=背景の 3ch mp4。base video と同じ解像度・fps |
+| `trimask` | mp4 binary | 3 値トリマスク（黒=対象前景=remove / 灰=背景=neutral / 白=他の前景=keep）。base video と同じ解像度・fps |
 | `prompt` | string | 背景プロンプト。本サーバは `CASPER_DEFAULT_PROMPT` を渡す |
 | `width` | int (string) | base video の幅（ピクセル）。sidecar 側で 16 の倍数に丸めて推論サイズに使う |
 | `height` | int (string) | base video の高さ（ピクセル）。同上 |

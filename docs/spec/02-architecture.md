@@ -19,15 +19,22 @@ flowchart LR
         API[HTTP Endpoints]
         Loader["Model Loader<br/>(起動時プリロード)"]
         Pred[SAM2 Predictor]
+        Det["Detectron2<br/>(COCO Mask R-CNN)"]
         Sess["Session Slot<br/>(base_video_path / inference_state)"]
-        MStore["MaskStore<br/>(直近の per-frame masks)"]
+        MStore["MaskStore<br/>(直近の trimask)"]
+        FStore["FullForegroundStore<br/>(R-CNN + SAM2 propagate 結果)"]
         Enc["Composite Encoder<br/>(base video＋マスク半透明合成)"]
         CClient["Casper Client<br/>(httpx)"]
         API --> Sess
         API --> Pred
+        API --> Det
         Loader --> Pred
+        Loader --> Det
         Pred --> Enc
         Pred --> MStore
+        Det --> FStore
+        Pred --> FStore
+        FStore --> MStore
         API --> CClient
     end
 

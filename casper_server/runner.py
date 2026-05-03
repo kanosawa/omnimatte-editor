@@ -38,14 +38,18 @@ def round_to_multiple_of_16(value: int) -> int:
 
 def do_pipeline_run(
     input_video_path: str,
-    mask_path: str,
+    trimask_path: str,
     width: int,
     height: int,
     prompt: str,
 ) -> bytes:
-    """既に一時ファイルとして配置された動画・マスクで Casper を回し、mp4 バイトを返す。
+    """既に一時ファイルとして配置された動画・トリマスクで Casper を回し、mp4 バイトを返す。
 
     呼び出し側で `run_lock` を取得しておくこと。GPU を 1 件ずつ使う前提。
+
+    `trimask_path` は 3 値 trimask（0=remove / 128=neutral / 255=keep）の mp4。
+    seq_dir には `trimask_00.mp4` として配置し、`mask_*.mp4` は置かないことで
+    gen-omnimatte の trimask 読み込み経路に流す。
     """
     snap_h = round_to_multiple_of_16(height)
     snap_w = round_to_multiple_of_16(width)
@@ -63,10 +67,10 @@ def do_pipeline_run(
     os.makedirs(save_dir, exist_ok=True)
 
     try:
-        # gen-omnimatte の get_video_mask_input は seq_dir 内の input_video.mp4 と
-        # mask_*.mp4 を読むので、配置し直す
+        # gen-omnimatte の get_video_mask_input は seq_dir 内の input_video.mp4 を読み、
+        # mask_*.mp4 が無ければ trimask_*.mp4 経路に進む
         shutil.copyfile(input_video_path, os.path.join(seq_dir, "input_video.mp4"))
-        shutil.copyfile(mask_path, os.path.join(seq_dir, "mask_00.mp4"))
+        shutil.copyfile(trimask_path, os.path.join(seq_dir, "trimask_00.mp4"))
 
         with open(os.path.join(seq_dir, "prompt.json"), "w", encoding="utf-8") as f:
             json.dump({"bg": prompt or CASPER_DEFAULT_PROMPT}, f)

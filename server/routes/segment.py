@@ -6,8 +6,13 @@ import torch
 from fastapi import APIRouter, HTTPException, Response
 
 from server.casper_client import preload_casper
+from server.full_foreground_store import full_foreground_store
 from server.mask_store import mask_store
-from server.model import SAM2_DEVICE, model_holder
+from server.model import (
+    DETECTRON2_IOU_WITH_TARGET,
+    SAM2_DEVICE,
+    model_holder,
+)
 from server.schemas import SegmentRequest
 from server.session import session_slot
 from server.video_io import composite_overlay_to_mp4
@@ -15,6 +20,15 @@ from server.video_io import composite_overlay_to_mp4
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+# Casper の trimask 規約（mp4 ピクセル値）。Casper 内部でバケット化される:
+#   < 64    → remove (1.0)
+#   64-192  → neutral (0.5)
+#   > 192   → keep (0.0)
+TRIMASK_REMOVE = 0      # 対象前景（消す）
+TRIMASK_NEUTRAL = 128   # 背景（neutral）
+TRIMASK_KEEP = 255      # 他の前景（残す）
 
 
 @router.post("/segment")
@@ -35,6 +49,20 @@ async def segment(req: SegmentRequest) -> Response:
             status_code=422,
             detail=f"frame_idx out of range: {req.frame_idx} >= {session.num_frames}",
         )
+
+    # 全前景抽出（バックグラウンド）の完了を待つ。タイムアウトは長めに
+    try:
+        await full_foreground_store.wait_ready(timeout=600.0)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    full_fg = full_foreground_store.current()
+    if full_fg is None:
+        raise HTTPException(status_code=503, detail="full foreground data unavailable")
+    if full_fg.base_video_path != session.base_video_path:
+        raise HTTPException(status_code=409, detail="full foreground data is stale")
 
     predictor = model_holder.predictor
     if predictor is None:
@@ -75,6 +103,37 @@ async def segment(req: SegmentRequest) -> Response:
             masks_in_order.append(results[i])
         else:
             masks_in_order.append(np.zeros((session.height, session.width), dtype=bool))
+    masks_target = np.stack(masks_in_order, axis=0)  # (T, H, W) bool
+
+    # R-CNN 検出物体から、対象前景と高 IoU のものを除外（領域単位）。
+    # IoU は req.frame_idx 時点で計算（BBox を打ったフレーム）
+    target_at_frame = masks_target[req.frame_idx]
+    other_fg_combined = np.zeros_like(masks_target, dtype=bool)
+    excluded = 0
+    kept = 0
+    for obj_masks in full_fg.per_object_masks:
+        if obj_masks.shape != masks_target.shape:
+            logger.warning(
+                "skip object: shape mismatch %s vs %s",
+                obj_masks.shape, masks_target.shape,
+            )
+            continue
+        iou = _compute_iou(target_at_frame, obj_masks[req.frame_idx])
+        if iou > DETECTRON2_IOU_WITH_TARGET:
+            excluded += 1
+            continue
+        other_fg_combined |= obj_masks
+        kept += 1
+    logger.info(
+        "trimask: target_at_frame_pixels=%d, other_fg_objects kept=%d excluded=%d",
+        int(target_at_frame.sum()), kept, excluded,
+    )
+
+    # trimask 構築（mp4 ピクセル値で 3 値）。
+    # 既定 = neutral、他の前景 = keep、対象前景 = remove（target が他より優先）
+    trimask = np.full(masks_target.shape, TRIMASK_NEUTRAL, dtype=np.uint8)
+    trimask[other_fg_combined & ~masks_target] = TRIMASK_KEEP
+    trimask[masks_target] = TRIMASK_REMOVE
 
     fps = session.fps
     try:
@@ -87,11 +146,9 @@ async def segment(req: SegmentRequest) -> Response:
         logger.exception("composite encoding failed")
         raise HTTPException(status_code=500, detail="composite encoding failed")
 
-    # /remove で同じマスクを使うため、サーバ側に保持する。
-    # base_video_path も併記して、後続の /remove が古い base に対するマスクで動かないようにする。
-    masks_array = np.stack(masks_in_order, axis=0)
+    # /remove で再利用するため、生成した trimask をサーバ側に保持する
     mask_store.set(
-        masks=masks_array,
+        trimask=trimask,
         base_video_path=session.base_video_path,
         fps=fps,
     )
@@ -102,7 +159,7 @@ async def segment(req: SegmentRequest) -> Response:
     asyncio.create_task(
         preload_casper(
             base_video_path=session.base_video_path,
-            masks=masks_array,
+            trimask=trimask,
             fps=fps,
             width=session.width,
             height=session.height,
@@ -110,3 +167,14 @@ async def segment(req: SegmentRequest) -> Response:
     )
 
     return Response(content=mp4_bytes, media_type="video/mp4")
+
+
+def _compute_iou(a: np.ndarray, b: np.ndarray) -> float:
+    """2 つのバイナリマスクの IoU。形状が違うときは 0 を返す。"""
+    if a.shape != b.shape:
+        return 0.0
+    inter = np.logical_and(a, b).sum()
+    union = np.logical_or(a, b).sum()
+    if union == 0:
+        return 0.0
+    return float(inter) / float(union)

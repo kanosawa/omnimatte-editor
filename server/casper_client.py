@@ -11,7 +11,7 @@ from server.model import (
     CASPER_SIDECAR_BASE,
     CASPER_STARTUP_TIMEOUT_SEC,
 )
-from server.video_io import write_mask_mp4
+from server.video_io import write_trimask_mp4
 
 
 logger = logging.getLogger(__name__)
@@ -48,31 +48,32 @@ async def get_casper_state() -> str:
 
 async def preload_casper(
     base_video_path: str,
-    masks: np.ndarray,
+    trimask: np.ndarray,
     fps: float,
     width: int,
     height: int,
 ) -> None:
     """sidecar の `POST /preload` を投げ捨てで叩き、先回り Casper 推論を依頼する。
 
+    `trimask`: (T, H, W) uint8 で、{0, 128, 255} の 3 値。
     `/segment` 完了直後に呼び、ユーザーが「前景削除」ボタンを押すまでの裏で
     sidecar が Casper を回しキャッシュに保存しておく。本関数は失敗しても
     例外を投げず（呼び出し側の処理を妨げないため）、ログだけ残す。
     """
-    fd, mask_path = tempfile.mkstemp(prefix="casper_preload_mask_", suffix=".mp4")
+    fd, trimask_path = tempfile.mkstemp(prefix="casper_preload_trimask_", suffix=".mp4")
     os.close(fd)
     try:
-        write_mask_mp4(masks=masks, fps=fps, out_path=mask_path)
+        write_trimask_mp4(trimask=trimask, fps=fps, out_path=trimask_path)
 
         url = f"{CASPER_SIDECAR_BASE}/preload"
         # /preload は即時 202 を返すので read timeout は短めで OK
         timeout = httpx.Timeout(connect=CASPER_STARTUP_TIMEOUT_SEC, read=10.0, write=60.0, pool=None)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                with open(base_video_path, "rb") as fv, open(mask_path, "rb") as fm:
+                with open(base_video_path, "rb") as fv, open(trimask_path, "rb") as ft:
                     files = {
                         "input_video": ("input_video.mp4", fv, "video/mp4"),
-                        "mask": ("mask_00.mp4", fm, "video/mp4"),
+                        "trimask": ("trimask_00.mp4", ft, "video/mp4"),
                     }
                     data = {
                         "prompt": CASPER_DEFAULT_PROMPT,
@@ -92,41 +93,43 @@ async def preload_casper(
             logger.warning("casper preload request failed: %s", exc)
     finally:
         try:
-            os.unlink(mask_path)
+            os.unlink(trimask_path)
         except OSError:
             pass
 
 
 async def run_casper(
     base_video_path: str,
-    masks: np.ndarray,
+    trimask: np.ndarray,
     fps: float,
     width: int,
     height: int,
 ) -> bytes:
     """sidecar の POST /run を呼び、前景削除済み mp4 バイナリを返す。
 
+    `trimask`: (T, H, W) uint8。値は {0, 128, 255} の 3 値で、それぞれ
+      remove（対象前景） / neutral（背景） / keep（他の前景）を表す。
     `width / height` は base video の解像度（ピクセル）。sidecar 側で
     16 の倍数に丸めて推論サイズに使う。
 
     呼び出し側は接続失敗・busy・推論失敗を例外で受け取り、適切な HTTP ステータスに変換する。
-    マスク mp4 の一時ファイルは関数内で作成・削除する。
+    trimask mp4 の一時ファイルは関数内で作成・削除する。
     """
-    fd, mask_path = tempfile.mkstemp(prefix="casper_mask_", suffix=".mp4")
+    fd, trimask_path = tempfile.mkstemp(prefix="casper_trimask_", suffix=".mp4")
     os.close(fd)
     try:
-        # マスクを base video と同じ解像度・fps で mp4 化
-        write_mask_mp4(masks=masks, fps=fps, out_path=mask_path)
+        # trimask を base video と同じ解像度・fps でロスレス mp4 化
+        write_trimask_mp4(trimask=trimask, fps=fps, out_path=trimask_path)
 
         url = f"{CASPER_SIDECAR_BASE}/run"
         # 接続タイムアウトのみ設定。読み取りは Casper 推論時間に依存するため上限なし
         timeout = httpx.Timeout(connect=CASPER_STARTUP_TIMEOUT_SEC, read=None, write=60.0, pool=None)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                with open(base_video_path, "rb") as fv, open(mask_path, "rb") as fm:
+                with open(base_video_path, "rb") as fv, open(trimask_path, "rb") as ft:
                     files = {
                         "input_video": ("input_video.mp4", fv, "video/mp4"),
-                        "mask": ("mask_00.mp4", fm, "video/mp4"),
+                        "trimask": ("trimask_00.mp4", ft, "video/mp4"),
                     }
                     data = {
                         "prompt": CASPER_DEFAULT_PROMPT,
@@ -149,7 +152,7 @@ async def run_casper(
         return res.content
     finally:
         try:
-            os.unlink(mask_path)
+            os.unlink(trimask_path)
         except OSError:
             pass
 
