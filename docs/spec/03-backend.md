@@ -359,16 +359,14 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 3. `frame_idx` の範囲チェック（無効なら 422）
 4. **`full_foreground_store.wait_ready(timeout=600.0)` で全前景抽出の完了を待機**（バックグラウンドで進行中の場合あり）
 5. **backend に bbox プロンプトを登録**（`sam_backend.add_bbox_prompt`）:
-   - **SAM2 backend** は内部で SAM2 image predictor による反復補正を行う（`_refine_mask_iteratively_for_bbox`）:
+   - **SAM2 backend** は SAM2 image predictor の複数候補から **tight bbox が入力 bbox に最も近い候補** を採用する（`_predict_initial_mask_for_bbox`）:
      - (pre-1) **bbox 周辺をマージン付きでクロップ**（マージン = bbox サイズ × `_CROP_MARGIN_RATIO=0.5`、フレーム境界でクリップ）
      - (pre-2) **クロップを長辺 `_UPSCALE_TARGET_LONG_SIDE=1024` に upscale**（`cv2.INTER_CUBIC`、長辺がすでに 1024 以上ならそのまま）。SAM2 内部の処理解像度が 1024 のため、bbox 周辺の effective 解像度を確保することで低解像度動画でも精度を保つ
-     - (a) bbox のみで予測（クロップ + scale 後の座標系）→ 初回マスク M0 を取得（SAM2 既定の単一選択に従う）
-     - (b) M0 が bbox を埋める比率（`fill_ratio`）を計算
-     - (c) `fill_ratio >= 0.5` なら M0 を採用（必要十分）
-     - (d) 未満の場合「サブコンポーネント疑い」とみなし、`bbox 内 ∧ ¬M0` の連結成分の中で面積上位の重心を `positive point` として最大 3 つ追加して再予測 → M1
-     - (e) M1 の `fill_ratio` が M0 より小さくなったら M0 にフォールバック（補正失敗の保険）
+     - (a) クロップ + scale 後の座標系で **`multimask_output=True`** を実行 → 候補マスクを 3 つ取得
+     - (b) 各候補マスクの **tight bbox**（true ピクセルの `(xmin, ymin, xmax, ymax)`）を計算
+     - (c) tight bbox と入力 bbox（クロップ座標系）の **IoU が最大の候補を採用**。サブコンポーネント（マスクが小さく bbox を満たさない）/ 反転（マスクが背景全体を覆う）/ leakage（マスクが bbox からはみ出す）の 3 ケースを 1 つの指標で同時に弾ける
      - (post) 採用したマスクを **`cv2.INTER_NEAREST` で元クロップ解像度にダウンスケール** し、原フレーム座標に貼り戻したうえで video predictor の `add_new_mask` に登録
-   - **SAM3 backend** は image-predictor 反復補正を**行わない**。`add_new_points_or_box(..., box=rel_box)` に bbox（normalized [0,1] に変換）を直接渡し、video predictor に登録する。SAM3 は低解像度入力に対する精度が SAM2 より高い前提のため crop+upscale も不要
+   - **SAM3 backend** は image-predictor 候補選択を**行わない**。`add_new_points_or_box(..., box=rel_box)` に bbox（normalized [0,1] に変換）を直接渡し、video predictor に登録する。SAM3 は低解像度入力に対する精度が SAM2 より高い前提のため crop+upscale も不要
 6. `predictor.reset_state(state)` で前回結果をクリア
 7. `predictor.add_new_mask(frame_idx, obj_id=0, mask=best_initial_mask)` で初期マスクを登録
 8. 順方向と逆方向の `propagate_in_video` を実行し、フレーム別マスク `masks_target (T,H,W) bool` を取得

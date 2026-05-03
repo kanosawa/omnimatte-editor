@@ -1,8 +1,9 @@
 """SAM2 backend 実装.
 
 `vendor/sam2` の `Sam2VideoPredictor` をラップする。
-`add_bbox_prompt` 内で SAM2 image predictor による bbox crop+upscale + 反復補正
-（旧 `server/routes/segment.py::_refine_mask_iteratively_for_bbox`）を行う。
+`add_bbox_prompt` 内で SAM2 image predictor を `multimask_output=True` で実行し、
+各候補マスクの tight bbox（true ピクセルの min/max x,y）が入力 bbox に最も近い
+ものを採用する。bbox crop+upscale（案 A）は精度確保のため維持する。
 """
 from __future__ import annotations
 
@@ -21,14 +22,6 @@ from server.video_io import read_frame_at
 
 logger = logging.getLogger(__name__)
 
-
-# 反復補正の閾値: bbox 内に対するマスク面積の比がこれ未満なら
-# 「サブコンポーネント疑い」とみなして positive point を追加して再予測する
-_REFINE_FILL_RATIO_THRESHOLD = 0.5
-# 追加する positive point の最大数
-_REFINE_MAX_POINTS = 3
-# 追加候補とする「bbox 内かつマスク外」の連結成分の最小面積（bbox 面積比）
-_REFINE_MIN_COMPONENT_AREA_RATIO = 0.02
 
 # bbox 周辺をクロップする時のマージン（bbox サイズに対する比率）
 _CROP_MARGIN_RATIO = 0.5
@@ -129,8 +122,8 @@ class Sam2Backend(SamBackend):
         height: int,
         width: int,
     ) -> np.ndarray:
-        # 1. crop+upscale + image predictor で初期マスクを得る
-        mask = self._refine_mask_iteratively_for_bbox(
+        # 1. crop+upscale + image predictor (multimask) → tight-bbox IoU で候補選択
+        mask = self._predict_initial_mask_for_bbox(
             base_video_path=base_video_path,
             frame_idx=frame_idx,
             bbox=bbox,
@@ -159,7 +152,7 @@ class Sam2Backend(SamBackend):
                 ]
                 yield int(frame_idx), [int(x) for x in obj_ids], masks
 
-    # ---------- bbox refinement (案 Y + 案 A) ----------
+    # ---------- bbox → 初期マスク（案 A crop+upscale + multimask 候補選択）----------
 
     def _get_image_predictor(self):
         from sam2.sam2_image_predictor import SAM2ImagePredictor
@@ -170,23 +163,25 @@ class Sam2Backend(SamBackend):
             self._image_predictor = SAM2ImagePredictor(self._require_predictor())
         return self._image_predictor
 
-    def _refine_mask_iteratively_for_bbox(
+    def _predict_initial_mask_for_bbox(
         self,
         base_video_path: str,
         frame_idx: int,
         bbox: list[float],
     ) -> np.ndarray:
-        """SAM2 画像プレディクタで反復補正してマスクを得る（案 Y + 案 A: bbox crop + upscale）。
+        """SAM2 image predictor の複数候補から tight bbox が入力 bbox に最も近いものを採用する。
 
         アルゴリズム:
           1. bbox 周辺 + マージンでフレームをクロップ
           2. クロップを長辺 1024 に upscale（cv2.INTER_CUBIC）
-          3. 拡大後のクロップ + 変換した bbox で SAM2 image predictor を実行 → M0
-          4. M0 が bbox を埋める比率（fill_ratio）を計算
-          5. fill_ratio >= threshold なら M0 を採用
-          6. それ以外は「bbox 内かつ M0 外」の連結成分の重心を positive point として
-             追加し再予測 → M1。M1 が M0 より良ければ M1、そうでなければ M0
-          7. 最終マスクを元解像度にダウンスケールし、原座標に貼り戻す
+          3. 拡大後のクロップ + 変換した bbox で `multimask_output=True` を実行（3 候補）
+          4. 各候補マスクの tight bbox（true ピクセルの min/max x,y）を計算
+          5. tight bbox と入力 bbox の IoU が最大の候補を採用
+          6. 最終マスクを元解像度にダウンスケールし、原座標に貼り戻す
+
+        この基準は「サブコンポーネント（マスクが小さく bbox を満たさない）」
+        「反転（マスクが背景全体を覆う）」「leakage（マスクが bbox からはみ出す）」
+        の 3 ケースを 1 つの指標で同時に弾く。
         """
         image_predictor = self._get_image_predictor()
 
@@ -219,82 +214,57 @@ class Sam2Backend(SamBackend):
             crop_proc = crop
         proc_h, proc_w = crop_proc.shape[:2]
 
-        # 3. bbox を crop+scale 座標系に変換
-        bbox_np = np.array(
+        # 3. bbox を crop+scale 座標系に変換（IoU 用に float のままクリップ）
+        bbox_proc = np.array(
             [(x1 - cx1) * scale, (y1 - cy1) * scale, (x2 - cx1) * scale, (y2 - cy1) * scale],
             dtype=np.float32,
         )
-        bx1 = max(0, int(round(bbox_np[0])))
-        by1 = max(0, int(round(bbox_np[1])))
-        bx2 = min(proc_w, int(round(bbox_np[2])))
-        by2 = min(proc_h, int(round(bbox_np[3])))
-        bbox_clipped_proc = (bx1, by1, bx2, by2)
-        bbox_area = max(1, (bx2 - bx1) * (by2 - by1))
+        input_box = (
+            max(0.0, float(bbox_proc[0])),
+            max(0.0, float(bbox_proc[1])),
+            min(float(proc_w), float(bbox_proc[2])),
+            min(float(proc_h), float(bbox_proc[3])),
+        )
 
         logger.info(
-            "refine: frame=%dx%d crop=%dx%d (margin=%.1f) → proc=%dx%d (scale=%.2f)",
-            w_orig, h_orig, crop_w, crop_h, _CROP_MARGIN_RATIO, proc_w, proc_h, scale,
+            "select: frame=%dx%d crop=%dx%d → proc=%dx%d (scale=%.2f) bbox_proc=(%.0f,%.0f,%.0f,%.0f)",
+            w_orig, h_orig, crop_w, crop_h, proc_w, proc_h, scale,
+            input_box[0], input_box[1], input_box[2], input_box[3],
         )
 
         with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
             image_predictor.set_image(crop_proc)
-
-            # 4. 初回予測（bbox のみ、SAM2 既定の選択に任せる）
-            masks_0, _scores_0, _ = image_predictor.predict(
-                box=bbox_np,
-                multimask_output=False,
+            # multimask_output=True で 3 候補を取得
+            masks, scores, _ = image_predictor.predict(
+                box=bbox_proc,
+                multimask_output=True,
             )
-            if len(masks_0) == 0:
+            if len(masks) == 0:
                 raise RuntimeError("SAM2 image predictor returned no mask")
-            mask_0_proc = masks_0[0].astype(bool)
 
-            in_bbox_0 = int(mask_0_proc[by1:by2, bx1:bx2].sum())
-            ratio_0 = in_bbox_0 / bbox_area
+        # 4-5. 各候補の tight bbox と入力 bbox の IoU を計算 → 最大の候補を選ぶ
+        best_idx = -1
+        best_iou = -1.0
+        for i in range(len(masks)):
+            m = masks[i].astype(bool)
+            tb = _mask_tight_bbox(m)
+            iou = _bbox_iou(input_box, tb) if tb is not None else 0.0
+            score = float(scores[i]) if i < len(scores) else 0.0
+            tb_str = "empty" if tb is None else f"({tb[0]:.0f},{tb[1]:.0f},{tb[2]:.0f},{tb[3]:.0f})"
             logger.info(
-                "refine: initial fill_ratio=%.3f (threshold=%.3f)",
-                ratio_0, _REFINE_FILL_RATIO_THRESHOLD,
+                "select: candidate %d sam_score=%.3f tight_bbox=%s bbox_iou=%.3f",
+                i, score, tb_str, iou,
             )
+            if iou > best_iou:
+                best_iou = iou
+                best_idx = i
 
-            if ratio_0 >= _REFINE_FILL_RATIO_THRESHOLD:
-                mask_proc = mask_0_proc
-            else:
-                # 5. サブコンポーネント疑い → 追加 positive point を探す
-                refine_points = _find_refinement_points(
-                    mask_0_proc, bbox_clipped_proc, bbox_area,
-                )
-                if not refine_points:
-                    logger.info("refine: no refinement points found, using initial mask")
-                    mask_proc = mask_0_proc
-                else:
-                    point_coords = np.array(refine_points, dtype=np.float32)
-                    point_labels = np.ones(len(refine_points), dtype=np.int32)
-                    logger.info(
-                        "refine: re-predicting with %d positive points: %s",
-                        len(refine_points),
-                        [(f"{p[0]:.0f}", f"{p[1]:.0f}") for p in refine_points],
-                    )
-                    masks_1, _scores_1, _ = image_predictor.predict(
-                        box=bbox_np,
-                        point_coords=point_coords,
-                        point_labels=point_labels,
-                        multimask_output=False,
-                    )
-                    mask_1_proc = masks_1[0].astype(bool)
+        if best_idx < 0:
+            raise RuntimeError("no valid mask candidate")
+        mask_proc = masks[best_idx].astype(bool)
+        logger.info("select: chose candidate %d (bbox_iou=%.3f)", best_idx, best_iou)
 
-                    in_bbox_1 = int(mask_1_proc[by1:by2, bx1:bx2].sum())
-                    ratio_1 = in_bbox_1 / bbox_area
-                    logger.info("refine: refined fill_ratio=%.3f", ratio_1)
-
-                    if ratio_1 < ratio_0:
-                        logger.info(
-                            "refine: refinement reduced fill_ratio (%.3f -> %.3f), falling back",
-                            ratio_0, ratio_1,
-                        )
-                        mask_proc = mask_0_proc
-                    else:
-                        mask_proc = mask_1_proc
-
-        # 7. 元解像度にダウンスケールして原座標に貼り戻す
+        # 6. 元解像度にダウンスケールして原座標に貼り戻す
         if scale != 1.0:
             mask_crop = cv2.resize(
                 mask_proc.astype(np.uint8), (crop_w, crop_h),
@@ -308,59 +278,27 @@ class Sam2Backend(SamBackend):
         return full_mask
 
 
-def _find_refinement_points(
-    mask: np.ndarray,
-    bbox_clipped: tuple[int, int, int, int],
-    bbox_area: int,
-) -> list[tuple[float, float]]:
-    """「bbox 内かつ mask 外」の領域から positive point の候補を抽出する。
+def _mask_tight_bbox(mask: np.ndarray) -> tuple[float, float, float, float] | None:
+    """マスクの true ピクセルの tight bbox `(xmin, ymin, xmax, ymax)`（exclusive max）。
 
-    アルゴリズム:
-      1. (in_bbox AND not mask) のバイナリを作る
-      2. 連結成分に分割
-      3. 面積上位、かつ bbox 面積比 >= 閾値の成分を最大 N 個選ぶ
-      4. 各成分の重心を point として返す。重心が成分外（凹形状）なら成分内の
-         代表ピクセルにフォールバック
-
-    返り値: `[(x, y), ...]` のピクセル座標リスト
+    全 false なら None を返す。
     """
-    h, w = mask.shape
-    x1, y1, x2, y2 = bbox_clipped
+    if not mask.any():
+        return None
+    ys, xs = np.where(mask)
+    return (float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1))
 
-    bbox_region = np.zeros_like(mask, dtype=np.uint8)
-    bbox_region[y1:y2, x1:x2] = 1
-    candidate = bbox_region & (~mask).astype(np.uint8)
-    if candidate.sum() == 0:
-        return []
 
-    n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-        candidate, connectivity=8,
-    )
-    if n_labels <= 1:
-        return []
-
-    min_area = max(1, int(_REFINE_MIN_COMPONENT_AREA_RATIO * bbox_area))
-
-    components = sorted(
-        ((int(stats[i, cv2.CC_STAT_AREA]), i) for i in range(1, n_labels)),
-        reverse=True,
-    )
-
-    points: list[tuple[float, float]] = []
-    for area, idx in components:
-        if area < min_area:
-            break
-        cx, cy = centroids[idx]
-        cx_int = int(round(cx))
-        cy_int = int(round(cy))
-        if 0 <= cy_int < h and 0 <= cx_int < w and labels[cy_int, cx_int] == idx:
-            points.append((float(cx), float(cy)))
-        else:
-            ys, xs = np.where(labels == idx)
-            if len(xs) > 0:
-                mid = len(xs) // 2
-                points.append((float(xs[mid]), float(ys[mid])))
-        if len(points) >= _REFINE_MAX_POINTS:
-            break
-
-    return points
+def _bbox_iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    """xyxy 形式 2 つの bbox の IoU（0..1）。"""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    iw = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    ih = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = iw * ih
+    a_area = max(0.0, (ax2 - ax1) * (ay2 - ay1))
+    b_area = max(0.0, (bx2 - bx1) * (by2 - by1))
+    union = a_area + b_area - inter
+    if union <= 0.0:
+        return 0.0
+    return float(inter / union)
