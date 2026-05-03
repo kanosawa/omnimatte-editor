@@ -63,7 +63,9 @@ casper_server/             # Casper sidecar
 |---|---|---|
 | `SAM2_CFG` | `configs/sam2.1/sam2.1_hiera_l.yaml` | SAM2 設定ファイル（hydra で解決） |
 | `SAM2_CKPT` | `<project_root>/vendor/sam2/checkpoints/sam2.1_hiera_large.pt` | チェックポイントの絶対パス（`__file__` 起点で解決） |
-| `SAM2_DEVICE` | `cuda` | 推論デバイス |
+| `SAM2_DEVICE` | `cuda` | SAM2 推論デバイス |
+| `SAM3_CKPT` | `<project_root>/vendor/sam3/checkpoints/sam3.safetensors`（環境変数 `OMNIMATTE_SAM3_CKPT` で上書き可） | SAM3 重みファイル。AEmotionStudio/sam3 (HF, non-gated) から `scripts/setup_sam3.py` で取得 |
+| `SAM3_DEVICE` | `cuda` | SAM3 推論デバイス |
 | `DETECTRON2_CONFIG` | `COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml` | COCO Mask R-CNN の config（model_zoo 指定） |
 | `DETECTRON2_DEVICE` | `cuda` | 検出推論デバイス |
 | `DETECTRON2_SCORE_THRESH` | `0.5` | 検出スコアのしきい値（COCO 既定） |
@@ -91,10 +93,12 @@ sidecar との通信は環境変数で制御する。
 
 | 環境変数 | 既定値 | 用途 |
 |---|---|---|
+| `OMNIMATTE_SAM_VERSION` | `2` | SAM backend 選択。`2` = SAM2 (`vendor/sam2`)、`3` = SAM3 (`vendor/sam3`) |
+| `OMNIMATTE_SAM3_CKPT` | `<project_root>/vendor/sam3/checkpoints/sam3.safetensors` | SAM3 重みファイルパス上書き |
 | `OMNIMATTE_CASPER_PORT` | `8765` | sidecar のリッスンポート |
 | `CASPER_SIDECAR_BASE` | `http://127.0.0.1:{OMNIMATTE_CASPER_PORT}` | 本サーバ → sidecar の HTTP ベース URL |
 | `OMNIMATTE_SPAWN_CASPER` | `1` | `0` のとき本サーバ lifespan で sidecar を spawn しない（クラウド分離・デバッグ用） |
-| `CASPER_STARTUP_TIMEOUT_SEC` | `5.0` | `/remove` で sidecar の `state="ready"` を待つ最大秒数（SAM2 と統一） |
+| `CASPER_STARTUP_TIMEOUT_SEC` | `5.0` | `/remove` で sidecar の `state="ready"` を待つ最大秒数（SAM と統一） |
 
 起動関連は [`run.py`](../../run.py) で扱う。
 
@@ -105,9 +109,22 @@ sidecar との通信は環境変数で制御する。
 
 バックエンドは原則ローカル待ち受け。クラウド GPU サーバ運用時はクライアント側で SSH ポート転送（`ssh -L 8000:127.0.0.1:8000 ...`）を張って接続する。アプリ側に認証層は持たず、アクセス制御はサーバの SSH/ファイアウォール設定で担保する。
 
-## 3.4 モデルロード（`model.py`）
+## 3.4 モデルロード（`sam_backend/`）
 
-### 3.4.1 ロードのライフサイクル
+### 3.4.1 SAM backend 抽象化
+
+SAM2 / SAM3 の両モデルを統一インターフェースで扱うため、[`server/sam_backend/`](../../server/sam_backend/) パッケージに以下を配置する。
+
+| ファイル | 役割 |
+|---|---|
+| `base.py` | `SamBackend` ABC。`state` / `version` / `wait_ready` / `init_state` / `reset_state` / `add_mask` / `add_bbox_prompt` / `propagate` を定義 |
+| `sam2_backend.py` | SAM2 実装。`Sam2VideoPredictor` をラップし、`add_bbox_prompt` 内で SAM2 image predictor + crop+upscale + 反復補正（旧 `_refine_mask_iteratively_for_bbox`）を行う |
+| `sam3_backend.py` | SAM3 実装。`build_sam3_video_model().tracker` をラップ。`add_bbox_prompt` は `add_new_points_or_box` に bbox（normalized [0,1] に変換）を直接渡す。SAM2 にあった image-predictor refinement は **行わない**（SAM3 は低解像度に強い前提のため） |
+| `__init__.py` | `OMNIMATTE_SAM_VERSION` env var (`"2"` / `"3"`、既定 `"2"`) を見て backend インスタンス `sam_backend` を構築・export |
+
+呼び出し側（`server/routes/*`、`server/full_foreground_store.py`）は `sam_backend` のみを介して SAM を扱い、バージョン依存ロジック（座標系・autocast・5-tuple vs 3-tuple の戻り値差・`max_frame_num_to_track` の必須性など）はすべて backend 内に閉じ込められる。
+
+### 3.4.2 ロードのライフサイクル
 
 ```mermaid
 stateDiagram-v2
@@ -118,35 +135,36 @@ stateDiagram-v2
     Failed --> [*]
 ```
 
-### 3.4.2 状態保持
+### 3.4.3 状態保持
 
-`ModelHolder` クラスがインスタンス（`model_holder`）として以下を保持する。
+各 backend は以下を保持する。
 
 - `state`: `"loading" | "ready" | "failed"`
-- `predictor`: SAM2 の `Sam2VideoPredictor`（ロード成功後）
+- `version`: `"sam2" | "sam3"`（`/health` で返す）
+- `_predictor`: ラップ対象の predictor（SAM2 は `Sam2VideoPredictor`、SAM3 は tracker）
 - `error`: ロード失敗時のエラーメッセージ
 - `_ready_event`: `asyncio.Event`（ロード完了シグナル）
 
 `threading.Lock` は使わない。ロード完了時の状態更新はイベントループ上で行うため、複数スレッドから同時アクセスされない。
 
-### 3.4.3 起動時のバックグラウンドロード
+### 3.4.4 起動時のバックグラウンドロード
 
-`main.py` の FastAPI lifespan で `asyncio.create_task(model_holder.load())` を呼ぶ。
+`main.py` の FastAPI lifespan で `asyncio.create_task(sam_backend.load())` を呼ぶ。
 
 ```python
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    asyncio.create_task(model_holder.load())
+    asyncio.create_task(sam_backend.load())
     yield
 ```
 
-`load()` 内では `asyncio.to_thread(self._load_sync)` を使い、SAM2 のブロッキング初期化処理を worker thread に逃がしながら、状態更新（`_state` 設定や `_ready_event.set()`）はイベントループ上で安全に行う。
+`load()` 内では `asyncio.to_thread(self._load_sync)` を使い、SAM のブロッキング初期化処理を worker thread に逃がしながら、状態更新（`_state` 設定や `_ready_event.set()`）はイベントループ上で安全に行う。
 
 - 起動直後は `state = "loading"`。サーバはすぐにリクエストを受け付ける
 - ロード完了で `state = "ready"`、`_ready_event.set()`
 - ロード失敗で `state = "failed"`、`error` にメッセージ、`_ready_event.set()`
 
-### 3.4.4 リクエスト処理時のロード待ち合わせ
+### 3.4.5 リクエスト処理時のロード待ち合わせ
 
 `/session` および `/segment` のハンドラ冒頭で `wait_ready(timeout=5.0)` を呼ぶ。
 
@@ -166,7 +184,7 @@ async def wait_ready(self, timeout: float | None = None) -> None:
 
 ハンドラ側では `TimeoutError` / `RuntimeError` を 503 に変換。タイムアウトはハードコードで 5.0 秒（[04-api.md §4.7](04-api.md#47-タイムアウト方針)）。
 
-`/health` はこの待ち合わせを行わず、現在の `state` をそのまま返す。
+`/health` はこの待ち合わせを行わず、現在の `state` と `version` をそのまま返す。
 
 ## 3.5 セッション管理（`session.py`）
 
@@ -340,15 +358,17 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 2. `SessionSlot.current()` で現在のセッションを取得（無ければ 409）
 3. `frame_idx` の範囲チェック（無効なら 422）
 4. **`full_foreground_store.wait_ready(timeout=600.0)` で全前景抽出の完了を待機**（バックグラウンドで進行中の場合あり）
-5. **`SAM2ImagePredictor` で反復補正により初期マスクを得る**（`_refine_mask_iteratively_for_bbox`）:
-   - (pre-1) **bbox 周辺をマージン付きでクロップ**（マージン = bbox サイズ × `_CROP_MARGIN_RATIO=0.5`、フレーム境界でクリップ）
-   - (pre-2) **クロップを長辺 `_UPSCALE_TARGET_LONG_SIDE=1024` に upscale**（`cv2.INTER_CUBIC`、長辺がすでに 1024 以上ならそのまま）。SAM2 内部の処理解像度が 1024 のため、bbox 周辺の effective 解像度を確保することで低解像度動画でも精度を保つ
-   - (a) bbox のみで予測（クロップ + scale 後の座標系）→ 初回マスク M0 を取得（SAM2 既定の単一選択に従う）
-   - (b) M0 が bbox を埋める比率（`fill_ratio`）を計算
-   - (c) `fill_ratio >= 0.5` なら M0 を採用（必要十分）
-   - (d) 未満の場合「サブコンポーネント疑い」とみなし、`bbox 内 ∧ ¬M0` の連結成分の中で面積上位の重心を `positive point` として最大 3 つ追加して再予測 → M1
-   - (e) M1 の `fill_ratio` が M0 より小さくなったら M0 にフォールバック（補正失敗の保険）
-   - (post) 採用したマスクを **`cv2.INTER_NEAREST` で元クロップ解像度にダウンスケール** し、原フレーム座標 (h_orig, w_orig) のゼロマスクに貼り戻して返す
+5. **backend に bbox プロンプトを登録**（`sam_backend.add_bbox_prompt`）:
+   - **SAM2 backend** は内部で SAM2 image predictor による反復補正を行う（`_refine_mask_iteratively_for_bbox`）:
+     - (pre-1) **bbox 周辺をマージン付きでクロップ**（マージン = bbox サイズ × `_CROP_MARGIN_RATIO=0.5`、フレーム境界でクリップ）
+     - (pre-2) **クロップを長辺 `_UPSCALE_TARGET_LONG_SIDE=1024` に upscale**（`cv2.INTER_CUBIC`、長辺がすでに 1024 以上ならそのまま）。SAM2 内部の処理解像度が 1024 のため、bbox 周辺の effective 解像度を確保することで低解像度動画でも精度を保つ
+     - (a) bbox のみで予測（クロップ + scale 後の座標系）→ 初回マスク M0 を取得（SAM2 既定の単一選択に従う）
+     - (b) M0 が bbox を埋める比率（`fill_ratio`）を計算
+     - (c) `fill_ratio >= 0.5` なら M0 を採用（必要十分）
+     - (d) 未満の場合「サブコンポーネント疑い」とみなし、`bbox 内 ∧ ¬M0` の連結成分の中で面積上位の重心を `positive point` として最大 3 つ追加して再予測 → M1
+     - (e) M1 の `fill_ratio` が M0 より小さくなったら M0 にフォールバック（補正失敗の保険）
+     - (post) 採用したマスクを **`cv2.INTER_NEAREST` で元クロップ解像度にダウンスケール** し、原フレーム座標に貼り戻したうえで video predictor の `add_new_mask` に登録
+   - **SAM3 backend** は image-predictor 反復補正を**行わない**。`add_new_points_or_box(..., box=rel_box)` に bbox（normalized [0,1] に変換）を直接渡し、video predictor に登録する。SAM3 は低解像度入力に対する精度が SAM2 より高い前提のため crop+upscale も不要
 6. `predictor.reset_state(state)` で前回結果をクリア
 7. `predictor.add_new_mask(frame_idx, obj_id=0, mask=best_initial_mask)` で初期マスクを登録
 8. 順方向と逆方向の `propagate_in_video` を実行し、フレーム別マスク `masks_target (T,H,W) bool` を取得

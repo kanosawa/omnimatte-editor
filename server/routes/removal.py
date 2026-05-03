@@ -3,7 +3,6 @@ import logging
 import os
 import tempfile
 
-import torch
 from fastapi import APIRouter, HTTPException, Response
 
 from server.casper_client import (
@@ -14,7 +13,7 @@ from server.casper_client import (
 )
 from server.full_foreground_store import full_foreground_store
 from server.mask_store import mask_store
-from server.model import SAM2_DEVICE, model_holder
+from server.sam_backend import sam_backend
 from server.session import session_slot
 from server.video_io import probe_video
 
@@ -26,7 +25,7 @@ logger = logging.getLogger(__name__)
 @router.post("/remove")
 async def remove_foreground() -> Response:
     try:
-        await model_holder.wait_ready(timeout=5.0)
+        await sam_backend.wait_ready(timeout=5.0)
     except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except RuntimeError as exc:
@@ -43,10 +42,6 @@ async def remove_foreground() -> Response:
     if record.base_video_path != session.base_video_path:
         # base video が前景削除や新規セッションで差し替わったあとに残っていたマスク
         raise HTTPException(status_code=409, detail="mask is stale")
-
-    predictor = model_holder.predictor
-    if predictor is None:
-        raise HTTPException(status_code=503, detail="predictor unavailable")
 
     base_video_path = session.base_video_path
     fps = session.fps
@@ -76,7 +71,7 @@ async def remove_foreground() -> Response:
     with open(new_video_path, "wb") as f:
         f.write(mp4_bytes)
 
-    # 新 base video のメタ取得 + SAM2 inference_state 再構築
+    # 新 base video のメタ取得 + SAM inference_state 再構築
     try:
         new_meta = probe_video(new_video_path)
     except ValueError as exc:
@@ -85,15 +80,14 @@ async def remove_foreground() -> Response:
         raise HTTPException(status_code=500, detail=str(exc))
 
     try:
-        with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
-            new_inference_state = predictor.init_state(video_path=new_video_path)
+        new_inference_state = sam_backend.init_state(video_path=new_video_path)
     except Exception:
         logger.exception("init_state failed for new base video")
         if os.path.exists(new_video_path):
             os.unlink(new_video_path)
         raise HTTPException(
             status_code=500,
-            detail="failed to reinitialize SAM2 state on new base video",
+            detail="failed to reinitialize SAM state on new base video",
         )
 
     new_session = session_slot.swap_base_video(

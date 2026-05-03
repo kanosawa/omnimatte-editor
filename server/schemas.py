@@ -7,6 +7,7 @@ ModelStateLiteral = Literal["loading", "ready", "failed"]
 CasperStateLiteral = Literal["loading", "ready", "failed", "unreachable"]
 DetectorStateLiteral = Literal["loading", "ready", "failed"]
 FullFgStateLiteral = Literal["empty", "loading", "ready", "failed"]
+SamVersionLiteral = Literal["sam2", "sam3"]
 
 
 class _CamelModel(BaseModel):
@@ -17,6 +18,7 @@ class _CamelModel(BaseModel):
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     model_state: ModelStateLiteral
+    sam_version: SamVersionLiteral
     casper_state: CasperStateLiteral
     detector_state: DetectorStateLiteral
     full_fg_state: FullFgStateLiteral

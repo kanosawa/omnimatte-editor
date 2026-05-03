@@ -1,5 +1,47 @@
 # omnimatte-editor
 
+## SAM backend の選択
+
+`OMNIMATTE_SAM_VERSION` 環境変数で SAM2 / SAM3 を切替できる（既定: `2` = SAM2）。
+
+| 値 | backend | 必要環境 |
+|---|---|---|
+| `2` | SAM2 (`vendor/sam2`) | Python 3.10+, PyTorch 2.x |
+| `3` | SAM3 (`vendor/sam3`) | **Python 3.12+, PyTorch 2.7+, CUDA 12.6+** |
+
+### SAM3 セットアップ（初回のみ）
+
+```bash
+# 1. Python 3.12+ の venv を別途用意（既存 venv は SAM3 非互換）
+python3.12 -m venv .venv-sam3
+source .venv-sam3/bin/activate   # Windows: .venv-sam3\Scripts\activate
+
+# 2. 共通依存をインストール
+pip install -r requirements.txt
+
+# 3. vendor/sam3 のクローン + pip install + 重み（sam3.safetensors）DL
+python scripts/setup_sam3.py
+```
+
+`scripts/setup_sam3.py` は以下を行う:
+1. `git submodule update --init vendor/sam3`
+2. `pip install -e vendor/sam3`
+3. [AEmotionStudio/sam3](https://huggingface.co/AEmotionStudio/sam3)（HF, non-gated mirror）から `sam3.safetensors` を `vendor/sam3/checkpoints/` に取得
+
+オプション: `--no-install`（pip install スキップ）、`--skip-weights`（重み DL スキップ）。
+
+### 起動例
+
+```bash
+# SAM2（既定）
+python run.py
+
+# SAM3（環境構築済み前提）
+OMNIMATTE_SAM_VERSION=3 python run.py
+```
+
+`/health` レスポンスの `samVersion` フィールドで現在の選択を確認できる。
+
 ## サーバ起動
 
 ```bash

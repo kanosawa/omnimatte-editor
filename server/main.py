@@ -12,9 +12,9 @@ from server.detector import detector_holder
 from server.model import (
     CASPER_PORT,
     SPAWN_CASPER,
-    model_holder,
 )
 from server.routes import health, removal, segment, session
+from server.sam_backend import sam_backend
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -63,7 +63,7 @@ def _spawn_sidecar() -> subprocess.Popen | None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    asyncio.create_task(model_holder.load())
+    asyncio.create_task(sam_backend.load())
     asyncio.create_task(detector_holder.load())
     sidecar_proc = _spawn_sidecar() if SPAWN_CASPER else None
     if not SPAWN_CASPER:

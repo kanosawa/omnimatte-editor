@@ -5,13 +5,12 @@ import shutil
 import tempfile
 
 import numpy as np
-import torch
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from server.detector import detector_holder
 from server.full_foreground_store import full_foreground_store
 from server.mask_store import mask_store
-from server.model import SAM2_DEVICE, model_holder
+from server.sam_backend import sam_backend
 from server.schemas import StartSessionResponse, VideoMeta
 from server.session import Session, session_slot
 from server.video_io import probe_video, read_frame_at
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 @router.post("/session", response_model=StartSessionResponse)
 async def start_session(video: UploadFile = File(...)) -> StartSessionResponse:
     try:
-        await model_holder.wait_ready(timeout=5.0)
+        await sam_backend.wait_ready(timeout=5.0)
     except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except RuntimeError as exc:
@@ -43,12 +42,7 @@ async def start_session(video: UploadFile = File(...)) -> StartSessionResponse:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
-        predictor = model_holder.predictor
-        if predictor is None:
-            raise HTTPException(status_code=503, detail="predictor unavailable")
-
-        with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
-            inference_state = predictor.init_state(video_path=tmp_path)
+        inference_state = sam_backend.init_state(video_path=tmp_path)
 
         session = session_slot.replace(
             inference_state=inference_state,
@@ -62,7 +56,7 @@ async def start_session(video: UploadFile = File(...)) -> StartSessionResponse:
         mask_store.clear()
         full_foreground_store.start_loading()
 
-        # 全前景抽出（R-CNN + SAM2 propagate）はバックグラウンドで実行。
+        # 全前景抽出（R-CNN + SAM propagate）はバックグラウンドで実行。
         # `/session` は即時 videoMeta を返し、`/segment` 側で wait_ready する。
         asyncio.create_task(_extract_full_foreground(session))
     except HTTPException:
@@ -87,10 +81,10 @@ async def start_session(video: UploadFile = File(...)) -> StartSessionResponse:
 
 
 async def _extract_full_foreground(session: Session) -> None:
-    """中間フレームに COCO Mask R-CNN を実行 → 各検出を SAM2 で全フレームに propagate。
+    """中間フレームに COCO Mask R-CNN を実行 → 各検出を SAM で全フレームに propagate。
 
     結果を `full_foreground_store` に保存する。`/session` 完了後にバックグラウンドで実行される。
-    SAM2 inference_state を共有して使うが、最後に reset_state してから返るので、
+    SAM inference_state を共有して使うが、最後に reset_state してから返るので、
     後続の `/segment` は通常通り state を使える。
     """
     base_video_path = session.base_video_path
@@ -110,7 +104,7 @@ async def _extract_full_foreground(session: Session) -> None:
             full_foreground_store.set_ready(per_object_masks=[], base_video_path=base_video_path)
             return
 
-        # SAM2 video propagate を別 thread で実行
+        # SAM video propagate を別 thread で実行
         per_object_masks = await asyncio.to_thread(
             _propagate_detected_masks,
             session,
@@ -132,14 +126,10 @@ def _propagate_detected_masks(
     detected_masks: list[np.ndarray],
     keyframe_idx: int,
 ) -> list[np.ndarray]:
-    """各 detected mask を SAM2 video predictor に登録し、順方向＋逆方向に propagate。
+    """各 detected mask を SAM video predictor に登録し、順方向＋逆方向に propagate。
 
     返り値: list of (T, H, W) bool。検出物体 1 つあたり 1 枚。
     """
-    predictor = model_holder.predictor
-    if predictor is None:
-        raise RuntimeError("predictor unavailable")
-
     state = session.inference_state
     n_objects = len(detected_masks)
     n_frames = session.num_frames
@@ -149,26 +139,24 @@ def _propagate_detected_masks(
         np.zeros((n_frames, h, w), dtype=bool) for _ in range(n_objects)
     ]
 
-    with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
-        predictor.reset_state(state)
-        for obj_id, mask in enumerate(detected_masks):
-            predictor.add_new_mask(
-                inference_state=state,
-                frame_idx=keyframe_idx,
-                obj_id=obj_id,
-                mask=mask,
-            )
+    sam_backend.reset_state(state)
+    for obj_id, mask in enumerate(detected_masks):
+        sam_backend.add_mask(
+            state=state, frame_idx=keyframe_idx, obj_id=obj_id, mask=mask,
+        )
 
-        def _collect(propagation):
-            for frame_idx, obj_ids, mask_logits in propagation:
-                # mask_logits: (N, 1, H, W)
-                for i, obj_id in enumerate(obj_ids):
-                    per_object[obj_id][frame_idx] = (mask_logits[i, 0] > 0.0).cpu().numpy()
+    for frame_idx, obj_ids, masks in sam_backend.propagate(
+        state, start_frame_idx=keyframe_idx, num_frames=n_frames,
+    ):
+        for i, obj_id in enumerate(obj_ids):
+            per_object[obj_id][frame_idx] = masks[i]
+    for frame_idx, obj_ids, masks in sam_backend.propagate(
+        state, start_frame_idx=keyframe_idx, num_frames=n_frames, reverse=True,
+    ):
+        for i, obj_id in enumerate(obj_ids):
+            per_object[obj_id][frame_idx] = masks[i]
 
-        _collect(predictor.propagate_in_video(state, start_frame_idx=keyframe_idx))
-        _collect(predictor.propagate_in_video(state, start_frame_idx=keyframe_idx, reverse=True))
-
-        # /segment が後でクリーンな state を使えるように reset
-        predictor.reset_state(state)
+    # /segment が後でクリーンな state を使えるように reset
+    sam_backend.reset_state(state)
 
     return per_object

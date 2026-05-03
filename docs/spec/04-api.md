@@ -29,6 +29,7 @@
 {
   "status": "ok",
   "model_state": "loading",
+  "sam_version": "sam2",
   "casper_state": "loading",
   "detector_state": "loading",
   "full_fg_state": "empty",
@@ -39,10 +40,11 @@
 | フィールド | 型 | 説明 |
 |---|---|---|
 | `status` | string | `"ok"` 固定 |
-| `model_state` | string | SAM2 のロード状態。`"loading"` / `"ready"` / `"failed"` |
+| `model_state` | string | 選択中 SAM backend のロード状態。`"loading"` / `"ready"` / `"failed"` |
+| `sam_version` | string | 選択中 SAM backend。`"sam2"` / `"sam3"`（`OMNIMATTE_SAM_VERSION` で切替、既定 `"sam2"`） |
 | `casper_state` | string | Casper sidecar のロード状態。`"loading"` / `"ready"` / `"failed"` / `"unreachable"`（sidecar に接続できない） |
 | `detector_state` | string | Detectron2 (COCO Mask R-CNN) のロード状態。`"loading"` / `"ready"` / `"failed"` |
-| `full_fg_state` | string | 全前景抽出（R-CNN + SAM2 propagation）の状態。`"empty"`（未開始）/ `"loading"`（バックグラウンド実行中）/ `"ready"` / `"failed"` |
+| `full_fg_state` | string | 全前景抽出（R-CNN + SAM propagation）の状態。`"empty"`（未開始）/ `"loading"`（バックグラウンド実行中）/ `"ready"` / `"failed"` |
 | `session_active` | boolean | 現在セッションが存在するか（バックエンドは常に最大1件） |
 
 ### 用途
