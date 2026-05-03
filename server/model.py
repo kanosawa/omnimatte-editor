@@ -30,7 +30,7 @@ CASPER_DEFAULT_PROMPT = "a clean background video."
 
 # 前景部分のみ Casper 出力で書き換える後処理（sidecar 内で実行）。
 # OFF にすると Casper の出力 mp4 をそのまま返す（デバッグ・品質比較用）
-FOREGROUND_ONLY_REPLACE = os.environ.get("OMNIMATTE_FOREGROUND_ONLY_REPLACE", "1") != "0"
+FOREGROUND_ONLY_REPLACE = os.environ.get("OMNIMATTE_FOREGROUND_ONLY_REPLACE", "0") != "0"
 # 判定マスクの diff 閾値（per-channel 0-255）。SAM2 マスク（dilate 後）と AND を取る
 FG_REPLACE_DIFF_THRESHOLD = int(os.environ.get("OMNIMATTE_FG_REPLACE_DIFF_THRESHOLD", "10"))
 # SAM2 マスクの dilate 量（ピクセル）。Casper の cfg.data.dilate_width=11 と一致

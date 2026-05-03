@@ -72,7 +72,7 @@ Casper（前景削除）関連の値はハードコードで、本サーバ・si
 | `CASPER_TEMPORAL_WINDOW_SIZE` | `21` | 一度に処理するフレーム数 |
 | `CASPER_MATTING_MODE` | `"all_fg"` | すべての前景を削除（マスク領域＝物体すべて） |
 | `CASPER_DEFAULT_PROMPT` | `"a clean background video."` | sidecar に送るプロンプトの既定値 |
-| `FOREGROUND_ONLY_REPLACE` | `True`（環境変数 `OMNIMATTE_FOREGROUND_ONLY_REPLACE`、`0` で無効化） | sidecar 内で「前景部分のみ Casper 出力で書き換え、残りは base video 画素を保持」する後処理を行うかどうか。OFF にすると Casper の生出力がそのまま返る |
+| `FOREGROUND_ONLY_REPLACE` | `False`（環境変数 `OMNIMATTE_FOREGROUND_ONLY_REPLACE`、`1` で有効化） | sidecar 内で「前景部分のみ Casper 出力で書き換え、残りは base video 画素を保持」する後処理を行うかどうか。既定では Casper の生出力がそのまま返る |
 | `FG_REPLACE_DIFF_THRESHOLD` | `10`（`OMNIMATTE_FG_REPLACE_DIFF_THRESHOLD`） | 判定マスクの per-channel 差分しきい値（0-255）。SAM2 マスク（dilate 後）と AND を取る |
 | `FG_REPLACE_MASK_DILATE` | `11`（`OMNIMATTE_FG_REPLACE_MASK_DILATE`） | SAM2 マスクの dilate ピクセル数。Casper の `cfg.data.dilate_width=11` と整合 |
 
