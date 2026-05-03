@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+import cv2
 import numpy as np
 import torch
 from fastapi import APIRouter, HTTPException, Response
@@ -15,7 +16,7 @@ from server.model import (
 )
 from server.schemas import SegmentRequest
 from server.session import session_slot
-from server.video_io import composite_overlay_to_mp4
+from server.video_io import composite_overlay_to_mp4, read_frame_at
 
 
 router = APIRouter()
@@ -72,13 +73,23 @@ async def segment(req: SegmentRequest) -> Response:
     results: dict[int, np.ndarray] = {}
 
     try:
+        # 1. 画像プレディクタで multimask 候補を取得し、ユーザー bbox を最も埋める候補を採用。
+        #    SAM2 既定の「IoU スコア最高」選択ではサブパーツが拾われがちなため。
+        best_initial_mask = _select_best_mask_candidate_for_bbox(
+            video_predictor=predictor,
+            base_video_path=session.base_video_path,
+            frame_idx=req.frame_idx,
+            bbox=req.bbox,
+        )
+
+        # 2. 採用したマスクを video predictor に登録 → 順方向 + 逆方向に propagate
         with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
             predictor.reset_state(state)
-            predictor.add_new_points_or_box(
+            predictor.add_new_mask(
                 inference_state=state,
                 frame_idx=req.frame_idx,
                 obj_id=0,
-                box=req.bbox,
+                mask=best_initial_mask,
             )
 
             def collect(propagation):
@@ -178,3 +189,63 @@ def _compute_iou(a: np.ndarray, b: np.ndarray) -> float:
     if union == 0:
         return 0.0
     return float(inter) / float(union)
+
+
+def _select_best_mask_candidate_for_bbox(
+    video_predictor,
+    base_video_path: str,
+    frame_idx: int,
+    bbox: list[float],
+) -> np.ndarray:
+    """SAM2 画像プレディクタで multimask 候補 3 つを取得し、ユーザー bbox を
+    最も埋める候補を選んで返す。
+
+    SAM2 既定の「IoU スコア最高」選択は、bbox 内のサブパーツ（顔だけ、車輪だけ等）が
+    高スコアになり物体全体が拾えないケースが少なくない。bbox 内に占める面積比で
+    選び直すことで、ユーザーの意図に沿ったマスクを採用する。
+
+    返り値: `(H, W) bool` の選ばれたマスク。`video_predictor.add_new_mask` に渡す。
+    """
+    from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+    # video predictor は SAM2Base のサブクラスなので、そのまま image predictor の
+    # ベースモデルとして共有できる（GPU メモリの二重ロード回避）
+    image_predictor = SAM2ImagePredictor(video_predictor)
+
+    frame_bgr = read_frame_at(base_video_path, frame_idx)
+    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+    bbox_np = np.array(bbox, dtype=np.float32)
+    with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
+        image_predictor.set_image(frame_rgb)
+        masks, scores, _ = image_predictor.predict(
+            box=bbox_np,
+            multimask_output=True,
+        )
+    # masks: (N, H, W) uint8 or bool; scores: (N,) float
+
+    if len(masks) == 0:
+        raise RuntimeError("SAM2 image predictor returned no candidates")
+
+    # bbox を画像範囲にクリップ
+    h, w = masks.shape[1], masks.shape[2]
+    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+    x1 = max(0, x1); y1 = max(0, y1)
+    x2 = min(w, x2); y2 = min(h, y2)
+    bbox_area = max(1, (x2 - x1) * (y2 - y1))
+
+    ratios = []
+    for m in masks:
+        m_bool = m.astype(bool) if m.dtype != bool else m
+        in_bbox = m_bool[y1:y2, x1:x2].sum()
+        ratios.append(float(in_bbox) / float(bbox_area))
+
+    best_idx = int(np.argmax(ratios))
+    best_mask = masks[best_idx].astype(bool) if masks[best_idx].dtype != bool else masks[best_idx]
+    logger.info(
+        "multimask candidates: scores=%s fill_ratios=%s -> picked idx=%d",
+        [f"{s:.3f}" for s in scores.tolist()],
+        [f"{r:.3f}" for r in ratios],
+        best_idx,
+    )
+    return best_mask

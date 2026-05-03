@@ -340,18 +340,19 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 2. `SessionSlot.current()` で現在のセッションを取得（無ければ 409）
 3. `frame_idx` の範囲チェック（無効なら 422）
 4. **`full_foreground_store.wait_ready(timeout=600.0)` で全前景抽出の完了を待機**（バックグラウンドで進行中の場合あり）
-5. `predictor.reset_state(state)` で前回結果をクリア
-6. `predictor.add_new_points_or_box(frame_idx, obj_id=0, box=...)`
-7. 順方向と逆方向の `propagate_in_video` を実行し、フレーム別マスク `masks_target (T,H,W) bool` を取得
-8. **R-CNN 検出物体から対象を除外**: 各 R-CNN 物体について `IoU(target_at_frame_idx, obj_at_frame_idx) > DETECTRON2_IOU_WITH_TARGET` ならスキップ。残りを OR して `other_fg_combined (T,H,W) bool`
-9. **trimask 構築** (`(T, H, W) uint8`、Casper の trimask 規約に合わせた値):
-   - 既定: `128`（neutral / 背景）
-   - `other_fg_combined & ~masks_target`: `255`（keep / 他の前景）
-   - `masks_target`: `0`（remove / 対象前景）
-10. `MaskStore.set(trimask=trimask, base_video_path=session.base_video_path, fps=session.fps)`
-11. `composite_overlay_to_mp4()` で base video＋対象マスク半透明合成 mp4 を作成（fps はセッションから取得）
-12. **`asyncio.create_task(preload_casper(...))`** で sidecar に先回り推論を依頼（投げ捨て）
-13. mp4 バイナリを `video/mp4` で返す
+5. **`SAM2ImagePredictor` で multimask 候補（3 つ）を取得し、ユーザー bbox を最も埋める候補を選んで初期マスクとする**（`_select_best_mask_candidate_for_bbox`）。SAM2 既定の「IoU スコア最高」だとサブパーツが拾われがちなため、bbox 内 fill ratio で選び直す
+6. `predictor.reset_state(state)` で前回結果をクリア
+7. `predictor.add_new_mask(frame_idx, obj_id=0, mask=best_initial_mask)` で初期マスクを登録
+8. 順方向と逆方向の `propagate_in_video` を実行し、フレーム別マスク `masks_target (T,H,W) bool` を取得
+9. **R-CNN 検出物体から対象を除外**: 各 R-CNN 物体について `IoU(target_at_frame_idx, obj_at_frame_idx) > DETECTRON2_IOU_WITH_TARGET` ならスキップ。残りを OR して `other_fg_combined (T,H,W) bool`
+10. **trimask 構築** (`(T, H, W) uint8`、Casper の trimask 規約に合わせた値):
+    - 既定: `128`（neutral / 背景）
+    - `other_fg_combined & ~masks_target`: `255`（keep / 他の前景）
+    - `masks_target`: `0`（remove / 対象前景）
+11. `MaskStore.set(trimask=trimask, base_video_path=session.base_video_path, fps=session.fps)`
+12. `composite_overlay_to_mp4()` で base video＋対象マスク半透明合成 mp4 を作成（fps はセッションから取得）
+13. **`asyncio.create_task(preload_casper(...))`** で sidecar に先回り推論を依頼（投げ捨て）
+14. mp4 バイナリを `video/mp4` で返す
 
 順方向＋逆方向の伝播は参照実装と同じ。
 
