@@ -241,6 +241,18 @@ def run_one_seq(
         skip_unet=cfg.experiment.skip_unet,
     ).videos
 
+    # gen-omnimatte の get_video_mask_input が VAE temporal stride に合わせて
+    # 末尾を reflection padding しているため、sample にも余分なフレームが含まれる
+    # （例: 43 → 45 にパディング）。元動画のフレーム数に切り詰めて、再生時に
+    # 末尾が「巻き戻し」のように見える現象を防ぐ。
+    n_original = _get_video_frame_count(os.path.join(seq_dir, "input_video.mp4"))
+    if n_original > 0 and sample.shape[2] > n_original:
+        logger.info(
+            "trimming Casper output: %d -> %d frames (drop temporal padding)",
+            sample.shape[2], n_original,
+        )
+        sample = sample[:, :, :n_original]
+
     os.makedirs(save_dir, exist_ok=True)
 
     save_video_name = f"{seq_name}-fg=" + "_".join([f"{i:02d}" for i in keep_fg_ids])
@@ -387,6 +399,19 @@ def _compose_foreground_only(
         out.append(composite)
 
     return out
+
+
+def _get_video_frame_count(path: str) -> int:
+    """mp4 のフレーム数を返す（OpenCV で probe）。失敗時は 0。"""
+    import cv2
+
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return 0
+    try:
+        return int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    finally:
+        cap.release()
 
 
 def _decode_video_rgb(path: str) -> list[np.ndarray]:
