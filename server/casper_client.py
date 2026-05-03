@@ -11,7 +11,7 @@ from server.model import (
     CASPER_SIDECAR_BASE,
     CASPER_STARTUP_TIMEOUT_SEC,
 )
-from server.video_io import write_trimask_mp4
+from server.video_io import write_mask_mp4
 
 
 logger = logging.getLogger(__name__)
@@ -48,36 +48,34 @@ async def get_casper_state() -> str:
 
 async def run_casper(
     base_video_path: str,
-    trimask: np.ndarray,
+    masks: np.ndarray,
     fps: float,
     width: int,
     height: int,
 ) -> bytes:
     """sidecar の POST /run を呼び、前景削除済み mp4 バイナリを返す。
 
-    `trimask`: (T, H, W) uint8。値は {0, 128, 255} の 3 値で、それぞれ
-      remove（対象前景） / neutral（背景） / keep（他の前景）を表す。
     `width / height` は base video の解像度（ピクセル）。sidecar 側で
     16 の倍数に丸めて推論サイズに使う。
 
     呼び出し側は接続失敗・busy・推論失敗を例外で受け取り、適切な HTTP ステータスに変換する。
-    trimask mp4 の一時ファイルは関数内で作成・削除する。
+    マスク mp4 の一時ファイルは関数内で作成・削除する。
     """
-    fd, trimask_path = tempfile.mkstemp(prefix="casper_trimask_", suffix=".mp4")
+    fd, mask_path = tempfile.mkstemp(prefix="casper_mask_", suffix=".mp4")
     os.close(fd)
     try:
-        # trimask を base video と同じ解像度・fps でロスレス mp4 化
-        write_trimask_mp4(trimask=trimask, fps=fps, out_path=trimask_path)
+        # マスクを base video と同じ解像度・fps で mp4 化
+        write_mask_mp4(masks=masks, fps=fps, out_path=mask_path)
 
         url = f"{CASPER_SIDECAR_BASE}/run"
         # 接続タイムアウトのみ設定。読み取りは Casper 推論時間に依存するため上限なし
         timeout = httpx.Timeout(connect=CASPER_STARTUP_TIMEOUT_SEC, read=None, write=60.0, pool=None)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                with open(base_video_path, "rb") as fv, open(trimask_path, "rb") as ft:
+                with open(base_video_path, "rb") as fv, open(mask_path, "rb") as fm:
                     files = {
                         "input_video": ("input_video.mp4", fv, "video/mp4"),
-                        "trimask": ("trimask_00.mp4", ft, "video/mp4"),
+                        "mask": ("mask_00.mp4", fm, "video/mp4"),
                     }
                     data = {
                         "prompt": CASPER_DEFAULT_PROMPT,
@@ -100,7 +98,7 @@ async def run_casper(
         return res.content
     finally:
         try:
-            os.unlink(trimask_path)
+            os.unlink(mask_path)
         except OSError:
             pass
 

@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from server.detector import detector_holder
 from server.model import (
     CASPER_PORT,
     SPAWN_CASPER,
@@ -64,7 +63,6 @@ def _spawn_sidecar() -> subprocess.Popen | None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     asyncio.create_task(model_holder.load())
-    asyncio.create_task(detector_holder.load())
     sidecar_proc = _spawn_sidecar() if SPAWN_CASPER else None
     if not SPAWN_CASPER:
         logger.info("OMNIMATTE_SPAWN_CASPER=0; skip spawning casper sidecar")

@@ -34,7 +34,7 @@ def _round_to_multiple_of_16(value: int) -> int:
 @router.post("/run")
 async def run(
     input_video: UploadFile = File(...),
-    trimask: UploadFile = File(...),
+    mask: UploadFile = File(...),
     width: int = Form(...),
     height: int = Form(...),
     prompt: str = Form(CASPER_DEFAULT_PROMPT),
@@ -76,10 +76,9 @@ async def run(
             with open(os.path.join(seq_dir, "input_video.mp4"), "wb") as f:
                 shutil.copyfileobj(input_video.file, f)
 
-            # 2. トリマスクを trimask_00.mp4 として配置
-            #    （mask_*.mp4 を置かないことで gen-omnimatte の trimask 経路に流れる）
-            with open(os.path.join(seq_dir, "trimask_00.mp4"), "wb") as f:
-                shutil.copyfileobj(trimask.file, f)
+            # 2. マスクを mask_00.mp4 として配置
+            with open(os.path.join(seq_dir, "mask_00.mp4"), "wb") as f:
+                shutil.copyfileobj(mask.file, f)
 
             # 3. prompt.json を生成
             with open(os.path.join(seq_dir, "prompt.json"), "w", encoding="utf-8") as f:
