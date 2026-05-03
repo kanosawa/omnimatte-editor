@@ -127,12 +127,16 @@ class Sam3Backend(SamBackend):
 
     def add_mask(self, state: Any, frame_idx: int, obj_id: int, mask: np.ndarray) -> None:
         predictor = self._require_predictor()
+        # SAM3 add_new_mask は 2D torch tensor を要求する（SAM2 は numpy も受ける）
+        mask_t = torch.as_tensor(mask)
+        if mask_t.ndim != 2:
+            raise ValueError(f"mask must be 2D, got shape {tuple(mask_t.shape)}")
         with torch.inference_mode(), torch.autocast(SAM3_DEVICE, dtype=torch.bfloat16):
             predictor.add_new_mask(
                 inference_state=state,
                 frame_idx=frame_idx,
                 obj_id=obj_id,
-                mask=mask,
+                mask=mask_t,
             )
 
     def add_bbox_prompt(
