@@ -51,7 +51,33 @@ class Sam3Backend(SamBackend):
         from sam3.model_builder import build_sam3_video_model
 
         logger.info("loading SAM3 model: ckpt=%s device=%s", SAM3_CKPT, SAM3_DEVICE)
-        sam3_model = build_sam3_video_model(checkpoint_path=SAM3_CKPT)
+
+        # build_sam3_video_model は checkpoint を `torch.load` で読むので
+        # safetensors 形式（AEmotionStudio/sam3 の配布形式）は直接渡せない。
+        # その場合は重み無しでモデルを構築 → safetensors を手動ロードして適用する。
+        if SAM3_CKPT.endswith(".safetensors"):
+            from safetensors.torch import load_file
+
+            sam3_model = build_sam3_video_model(
+                checkpoint_path=None, load_from_HF=False,
+            )
+            ckpt = load_file(SAM3_CKPT, device="cpu")
+            if "model" in ckpt and isinstance(ckpt["model"], dict):
+                ckpt = ckpt["model"]
+            missing, unexpected = sam3_model.load_state_dict(ckpt, strict=False)
+            if missing:
+                logger.warning(
+                    "SAM3 missing keys: %d (first: %s)",
+                    len(missing), missing[:3],
+                )
+            if unexpected:
+                logger.warning(
+                    "SAM3 unexpected keys: %d (first: %s)",
+                    len(unexpected), unexpected[:3],
+                )
+        else:
+            sam3_model = build_sam3_video_model(checkpoint_path=SAM3_CKPT)
+
         # tracker と detector は backbone を共有する（メモリ削減）
         predictor = sam3_model.tracker
         predictor.backbone = sam3_model.detector.backbone
