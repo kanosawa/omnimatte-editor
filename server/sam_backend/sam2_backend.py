@@ -242,27 +242,29 @@ class Sam2Backend(SamBackend):
             if len(masks) == 0:
                 raise RuntimeError("SAM2 image predictor returned no mask")
 
-        # 4-5. 各候補の tight bbox と入力 bbox の IoU を計算 → 最大の候補を選ぶ
+        # 4-5. 各候補について「sam_score + bbox_iou」を計算 → 最大の候補を選ぶ
+        # （sam_score は SAM2 の予測確信度、bbox_iou は tight bbox と入力 bbox の IoU）
         best_idx = -1
-        best_iou = -1.0
+        best_total = -1.0
         for i in range(len(masks)):
             m = masks[i].astype(bool)
             tb = _mask_tight_bbox(m)
             iou = _bbox_iou(input_box, tb) if tb is not None else 0.0
             score = float(scores[i]) if i < len(scores) else 0.0
+            total = score + iou
             tb_str = "empty" if tb is None else f"({tb[0]:.0f},{tb[1]:.0f},{tb[2]:.0f},{tb[3]:.0f})"
             logger.info(
-                "select: candidate %d sam_score=%.3f tight_bbox=%s bbox_iou=%.3f",
-                i, score, tb_str, iou,
+                "select: candidate %d sam_score=%.3f bbox_iou=%.3f total=%.3f tight_bbox=%s",
+                i, score, iou, total, tb_str,
             )
-            if iou > best_iou:
-                best_iou = iou
+            if total > best_total:
+                best_total = total
                 best_idx = i
 
         if best_idx < 0:
             raise RuntimeError("no valid mask candidate")
         mask_proc = masks[best_idx].astype(bool)
-        logger.info("select: chose candidate %d (bbox_iou=%.3f)", best_idx, best_iou)
+        logger.info("select: chose candidate %d (total=%.3f)", best_idx, best_total)
 
         # 6. 元解像度にダウンスケールして原座標に貼り戻す
         if scale != 1.0:

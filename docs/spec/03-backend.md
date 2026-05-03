@@ -364,7 +364,7 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
      - (pre-2) **クロップを長辺 `_UPSCALE_TARGET_LONG_SIDE=1024` に upscale**（`cv2.INTER_CUBIC`、長辺がすでに 1024 以上ならそのまま）。SAM2 内部の処理解像度が 1024 のため、bbox 周辺の effective 解像度を確保することで低解像度動画でも精度を保つ
      - (a) クロップ + scale 後の座標系で **`multimask_output=True`** を実行 → 候補マスクを 3 つ取得
      - (b) 各候補マスクの **tight bbox**（true ピクセルの `(xmin, ymin, xmax, ymax)`）を計算
-     - (c) tight bbox と入力 bbox（クロップ座標系）の **IoU が最大の候補を採用**。サブコンポーネント（マスクが小さく bbox を満たさない）/ 反転（マスクが背景全体を覆う）/ leakage（マスクが bbox からはみ出す）の 3 ケースを 1 つの指標で同時に弾ける
+     - (c) **`sam_score + bbox_iou` が最大の候補を採用**。`sam_score` は SAM2 の予測確信度、`bbox_iou` は tight bbox と入力 bbox（クロップ座標系）の IoU。bbox_iou 単体でサブコンポーネント / 反転 / leakage の 3 ケースを同時に弾けるが、sam_score を加えることで「IoU が僅差の場合は確信度が高い候補を優先」する
      - (post) 採用したマスクを **`cv2.INTER_NEAREST` で元クロップ解像度にダウンスケール** し、原フレーム座標に貼り戻したうえで video predictor の `add_new_mask` に登録
    - **SAM3 backend** は image-predictor 候補選択を**行わない**。`add_new_points_or_box(..., box=rel_box)` に bbox（normalized [0,1] に変換）を直接渡し、video predictor に登録する。SAM3 は低解像度入力に対する精度が SAM2 より高い前提のため crop+upscale も不要
 6. `predictor.reset_state(state)` で前回結果をクリア
