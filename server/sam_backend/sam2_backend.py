@@ -3,12 +3,11 @@
 `vendor/sam2` の `Sam2VideoPredictor` をラップする。
 `add_bbox_prompt` は video predictor の `add_new_points_or_box` に bbox を直接渡し、
 返ってきた `video_res_masks`（元解像度 logits）を bool 化して返す。SAM2 が想定する
-正規の box prompt パスを使うことで、prompt embedding が memory bank に正しく入り、
-propagation 全体の精度が保たれる。
+正規の box prompt パスを使うことで、prompt embedding が memory bank に正しく入る。
 
-外側で `torch.inference_mode()` / `torch.autocast(bf16)` を被せると、SAM2 内部が
-想定する dtype 管理を上書きしてしまい精度が落ちるため、これらのコンテキストマネージャは
-使わない（SAM2 の各メソッドは `@torch.inference_mode()` デコレータを内部で持つ）。
+各メソッドは `torch.inference_mode()` + `torch.autocast(bf16)` で囲む。
+SAM2 公式の notebook と同じ設定で、Ampere 以降の GPU で bf16 Tensor Core を使い
+matmul を約 2 倍高速化する（image encoder / memory attention / propagate の支配的コスト）。
 """
 from __future__ import annotations
 
@@ -17,6 +16,7 @@ import logging
 from typing import Any, Iterator
 
 import numpy as np
+import torch
 
 from server.model import SAM2_CFG, SAM2_CKPT, SAM2_DEVICE
 from server.sam_backend.base import ModelState, PropagateItem, SamBackend
@@ -86,22 +86,25 @@ class Sam2Backend(SamBackend):
 
     def init_state(self, video_path: str) -> Any:
         predictor = self._require_predictor()
-        return predictor.init_state(video_path=video_path)
+        with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
+            return predictor.init_state(video_path=video_path)
 
     def reset_state(self, state: Any) -> None:
         predictor = self._require_predictor()
-        predictor.reset_state(state)
+        with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
+            predictor.reset_state(state)
 
     # ---------- マスク登録 ----------
 
     def add_mask(self, state: Any, frame_idx: int, obj_id: int, mask: np.ndarray) -> None:
         predictor = self._require_predictor()
-        predictor.add_new_mask(
-            inference_state=state,
-            frame_idx=frame_idx,
-            obj_id=obj_id,
-            mask=mask,
-        )
+        with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
+            predictor.add_new_mask(
+                inference_state=state,
+                frame_idx=frame_idx,
+                obj_id=obj_id,
+                mask=mask,
+            )
 
     def add_bbox_prompt(
         self,
@@ -115,12 +118,13 @@ class Sam2Backend(SamBackend):
     ) -> np.ndarray:
         predictor = self._require_predictor()
         box = np.asarray(bbox, dtype=np.float32)  # xyxy pixel
-        _, out_obj_ids, video_res_masks = predictor.add_new_points_or_box(
-            inference_state=state,
-            frame_idx=frame_idx,
-            obj_id=obj_id,
-            box=box,
-        )
+        with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
+            _, out_obj_ids, video_res_masks = predictor.add_new_points_or_box(
+                inference_state=state,
+                frame_idx=frame_idx,
+                obj_id=obj_id,
+                box=box,
+            )
         # video_res_masks: tensor (N, 1, H, W) の logits（base video 解像度）
         try:
             i = list(int(x) for x in out_obj_ids).index(int(obj_id))
@@ -141,11 +145,12 @@ class Sam2Backend(SamBackend):
         reverse: bool = False,
     ) -> Iterator[PropagateItem]:
         predictor = self._require_predictor()
-        for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(
-            state, start_frame_idx=start_frame_idx, reverse=reverse,
-        ):
-            # mask_logits: (N, 1, H, W) tensor
-            masks = [
-                (mask_logits[i, 0] > 0.0).cpu().numpy() for i in range(len(obj_ids))
-            ]
-            yield int(frame_idx), [int(x) for x in obj_ids], masks
+        with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
+            for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(
+                state, start_frame_idx=start_frame_idx, reverse=reverse,
+            ):
+                # mask_logits: (N, 1, H, W) tensor
+                masks = [
+                    (mask_logits[i, 0] > 0.0).cpu().numpy() for i in range(len(obj_ids))
+                ]
+                yield int(frame_idx), [int(x) for x in obj_ids], masks
