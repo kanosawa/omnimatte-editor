@@ -64,8 +64,8 @@ async def segment(req: SegmentRequest) -> Response:
     results: dict[int, np.ndarray] = {}
 
     try:
-        # 1. backend に bbox プロンプトを登録（SAM2 は内部で crop+upscale + image predictor
-        #    refinement を行う。SAM3 は video predictor の add_new_points_or_box に直接渡す）。
+        # 1. backend に bbox プロンプトを登録（SAM2/SAM3 とも video predictor の
+        #    add_new_points_or_box に bbox を直接渡す）。
         #    呼び出し側はリセットしてから登録 → 順 / 逆 propagate するだけ。
         sam_backend.reset_state(state)
         sam_backend.add_bbox_prompt(

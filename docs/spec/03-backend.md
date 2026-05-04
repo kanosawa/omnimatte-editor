@@ -118,8 +118,8 @@ SAM2 / SAM3 の両モデルを統一インターフェースで扱うため、[`
 | ファイル | 役割 |
 |---|---|
 | `base.py` | `SamBackend` ABC。`state` / `version` / `wait_ready` / `init_state` / `reset_state` / `add_mask` / `add_bbox_prompt` / `propagate` を定義 |
-| `sam2_backend.py` | SAM2 実装。`Sam2VideoPredictor` をラップし、`add_bbox_prompt` 内で SAM2 image predictor + crop+upscale + 反復補正（旧 `_refine_mask_iteratively_for_bbox`）を行う |
-| `sam3_backend.py` | SAM3 実装。`build_sam3_video_model().tracker` をラップ。`add_bbox_prompt` は `add_new_points_or_box` に bbox（normalized [0,1] に変換）を直接渡す。SAM2 にあった image-predictor refinement は **行わない**（SAM3 は低解像度に強い前提のため） |
+| `sam2_backend.py` | SAM2 実装。`Sam2VideoPredictor` をラップし、`add_bbox_prompt` で `add_new_points_or_box` に bbox を直接渡す |
+| `sam3_backend.py` | SAM3 実装。`build_sam3_video_model().tracker` をラップ。`add_bbox_prompt` は `add_new_points_or_box` に bbox（normalized [0,1] に変換）を直接渡す |
 | `__init__.py` | `OMNIMATTE_SAM_VERSION` env var (`"2"` / `"3"`、既定 `"2"`) を見て backend インスタンス `sam_backend` を構築・export |
 
 呼び出し側（`server/routes/*`、`server/full_foreground_store.py`）は `sam_backend` のみを介して SAM を扱い、バージョン依存ロジック（座標系・autocast・5-tuple vs 3-tuple の戻り値差・`max_frame_num_to_track` の必須性など）はすべて backend 内に閉じ込められる。
@@ -358,27 +358,20 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 2. `SessionSlot.current()` で現在のセッションを取得（無ければ 409）
 3. `frame_idx` の範囲チェック（無効なら 422）
 4. **`full_foreground_store.wait_ready(timeout=600.0)` で全前景抽出の完了を待機**（バックグラウンドで進行中の場合あり）
-5. **backend に bbox プロンプトを登録**（`sam_backend.add_bbox_prompt`）:
-   - **SAM2 backend** は SAM2 image predictor の複数候補から **tight bbox が入力 bbox に最も近い候補** を採用する（`_predict_initial_mask_for_bbox`）:
-     - (pre-1) **bbox 周辺をマージン付きでクロップ**（マージン = bbox サイズ × `_CROP_MARGIN_RATIO=0.5`、フレーム境界でクリップ）
-     - (pre-2) **クロップを長辺 `_UPSCALE_TARGET_LONG_SIDE=1024` に upscale**（`cv2.INTER_CUBIC`、長辺がすでに 1024 以上ならそのまま）。SAM2 内部の処理解像度が 1024 のため、bbox 周辺の effective 解像度を確保することで低解像度動画でも精度を保つ
-     - (a) クロップ + scale 後の座標系で **`multimask_output=True`** を実行 → 候補マスクを 3 つ取得
-     - (b) 各候補マスクの **tight bbox**（true ピクセルの `(xmin, ymin, xmax, ymax)`）を計算
-     - (c) **`sam_score + bbox_iou` が最大の候補を採用**。`sam_score` は SAM2 の予測確信度、`bbox_iou` は tight bbox と入力 bbox（クロップ座標系）の IoU。bbox_iou 単体でサブコンポーネント / 反転 / leakage の 3 ケースを同時に弾けるが、sam_score を加えることで「IoU が僅差の場合は確信度が高い候補を優先」する
-     - (post) 採用したマスクを **`cv2.INTER_NEAREST` で元クロップ解像度にダウンスケール** し、原フレーム座標に貼り戻したうえで video predictor の `add_new_mask` に登録
-   - **SAM3 backend** は image-predictor 候補選択を**行わない**。`add_new_points_or_box(..., box=rel_box)` に bbox（normalized [0,1] に変換）を直接渡し、video predictor に登録する。SAM3 は低解像度入力に対する精度が SAM2 より高い前提のため crop+upscale も不要
-6. `predictor.reset_state(state)` で前回結果をクリア
-7. `predictor.add_new_mask(frame_idx, obj_id=0, mask=best_initial_mask)` で初期マスクを登録
-8. 順方向と逆方向の `propagate_in_video` を実行し、フレーム別マスク `masks_target (T,H,W) bool` を取得
-9. **R-CNN 検出物体から対象を除外**: 各 R-CNN 物体について `IoU(target_at_frame_idx, obj_at_frame_idx) > DETECTRON2_IOU_WITH_TARGET` ならスキップ。残りを OR して `other_fg_combined (T,H,W) bool`
-10. **trimask 構築** (`(T, H, W) uint8`、Casper の trimask 規約に合わせた値):
+5. `sam_backend.reset_state(state)` で前回結果をクリア
+6. **backend に bbox プロンプトを登録**（`sam_backend.add_bbox_prompt`）:
+   - **SAM2 backend** は video predictor の `add_new_points_or_box(..., box=bbox)` に bbox（pixel xyxy）を直接渡す。SAM2 ネイティブの box prompt embedding が memory bank に正規格納され、propagation の memory attention が想定通りに働く
+   - **SAM3 backend** は `add_new_points_or_box(..., box=rel_box)` に bbox（normalized [0,1] に変換）を直接渡す
+7. 順方向と逆方向の `propagate_in_video` を実行し、フレーム別マスク `masks_target (T,H,W) bool` を取得
+8. **R-CNN 検出物体から対象を除外**: 各 R-CNN 物体について `IoU(target_at_frame_idx, obj_at_frame_idx) > DETECTRON2_IOU_WITH_TARGET` ならスキップ。残りを OR して `other_fg_combined (T,H,W) bool`
+9. **trimask 構築** (`(T, H, W) uint8`、Casper の trimask 規約に合わせた値):
     - 既定: `128`（neutral / 背景）
     - `other_fg_combined & ~masks_target`: `255`（keep / 他の前景）
     - `masks_target`: `0`（remove / 対象前景）
-11. `MaskStore.set(trimask=trimask, base_video_path=session.base_video_path, fps=session.fps)`
-12. `composite_overlay_to_mp4()` で base video＋対象マスク半透明合成 mp4 を作成（fps はセッションから取得）
-13. **`asyncio.create_task(preload_casper(...))`** で sidecar に先回り推論を依頼（投げ捨て）
-14. mp4 バイナリを `video/mp4` で返す
+10. `MaskStore.set(trimask=trimask, base_video_path=session.base_video_path, fps=session.fps)`
+11. `composite_overlay_to_mp4()` で base video＋対象マスク半透明合成 mp4 を作成（fps はセッションから取得）
+12. **`asyncio.create_task(preload_casper(...))`** で sidecar に先回り推論を依頼（投げ捨て）
+13. mp4 バイナリを `video/mp4` で返す
 
 順方向＋逆方向の伝播は参照実装と同じ。
 

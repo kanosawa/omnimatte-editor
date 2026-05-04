@@ -86,12 +86,11 @@ class SamBackend(ABC):
         """bbox プロンプトを登録し、初期フレームの bool[H, W] マスクを返す。
 
         - bbox: `[x1, y1, x2, y2]` の動画ピクセル座標
-        - base_video_path: SAM2 image-predictor refinement で frame を読むのに必要
+        - base_video_path: 一部 backend が frame を読むのに使う（現状の SAM2/SAM3 では未使用）
         - height/width: 出力マスク解像度（base video の解像度）
 
-        SAM2 backend は内部で crop+upscale + image-predictor + 反復補正を行ってから
-        その結果を `add_mask` 相当で video predictor に登録する。
-        SAM3 backend は video predictor の `add_new_points_or_box` に bbox を直接渡す。
+        SAM2 backend / SAM3 backend ともに video predictor の `add_new_points_or_box`
+        に bbox を直接渡す。SAM3 は normalized [0, 1] への変換のみ行う。
         """
 
     # ---------- 伝播 ----------
