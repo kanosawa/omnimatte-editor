@@ -46,6 +46,14 @@ async def segment(req: SegmentRequest) -> Response:
             detail=f"frame_idx out of range: {req.frame_idx} >= {session.num_frames}",
         )
 
+    # 診断用: 受け取ったパラメータと base video のパスをログに出す。
+    # これを scripts/sam2_diagnose.py に同じ値で渡せば、実験コードパスでの結果と直接比較できる。
+    logger.info(
+        "segment request: frame_idx=%d bbox=%s session=(%dx%d) num_frames=%d base_video=%s sam_frames_dir=%s",
+        req.frame_idx, req.bbox, session.width, session.height, session.num_frames,
+        session.base_video_path, session.sam_frames_dir,
+    )
+
     # 全前景抽出（バックグラウンド）の完了を待つ。タイムアウトは長めに
     try:
         await full_foreground_store.wait_ready(timeout=600.0)
