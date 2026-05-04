@@ -121,6 +121,38 @@ def composite_overlay_to_mp4(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def extract_frames_to_jpeg_dir(video_path: str, jpeg_quality: int = 95) -> str:
+    """MP4 を frame_idx 順の JPEG ディレクトリに展開し、ディレクトリパスを返す。
+
+    SAM2 の `init_state` に `.mp4` を直接渡すと内部で `decord.VideoReader` の
+    `width=/height=` 指定リサイズ（fast bilinear）が走り、PIL 経由（JPEG ディレクトリ）
+    と比べてエンコード入力品質が下がる。これを避けるため事前展開する。
+    """
+    out_dir = tempfile.mkdtemp(prefix="omnimatte_sam_frames_")
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        shutil.rmtree(out_dir, ignore_errors=True)
+        raise ValueError(f"cannot open video: {video_path}")
+    idx = 0
+    try:
+        while True:
+            ok, frame_bgr = cap.read()
+            if not ok:
+                break
+            cv2.imwrite(
+                os.path.join(out_dir, f"{idx:05d}.jpg"),
+                frame_bgr,
+                [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)],
+            )
+            idx += 1
+    finally:
+        cap.release()
+    if idx == 0:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        raise ValueError(f"no frames extracted from: {video_path}")
+    return out_dir
+
+
 def read_frame_at(video_path: str, frame_idx: int) -> np.ndarray:
     """指定フレームを BGR (H, W, 3) uint8 で読み出す。Detectron2 が BGR を要求するため。"""
     cap = cv2.VideoCapture(video_path)

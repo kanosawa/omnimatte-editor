@@ -13,7 +13,7 @@ from server.mask_store import mask_store
 from server.sam_backend import sam_backend
 from server.schemas import StartSessionResponse, VideoMeta
 from server.session import Session, session_slot
-from server.video_io import probe_video, read_frame_at
+from server.video_io import extract_frames_to_jpeg_dir, probe_video, read_frame_at
 
 
 router = APIRouter()
@@ -32,6 +32,7 @@ async def start_session(video: UploadFile = File(...)) -> StartSessionResponse:
     suffix = os.path.splitext(video.filename or "")[1] or ".mp4"
     fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     os.close(fd)
+    sam_frames_dir: str | None = None
 
     try:
         with open(tmp_path, "wb") as out:
@@ -42,11 +43,19 @@ async def start_session(video: UploadFile = File(...)) -> StartSessionResponse:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
-        inference_state = sam_backend.init_state(video_path=tmp_path)
+        # SAM2 init_state には MP4 を直接渡さず、JPEG ディレクトリに展開してから渡す
+        # （decord 経由のリサイズより PIL ルートの方がエンコード入力品質が高いため）。
+        try:
+            sam_frames_dir = await asyncio.to_thread(extract_frames_to_jpeg_dir, tmp_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        inference_state = sam_backend.init_state(video_path=sam_frames_dir)
 
         session = session_slot.replace(
             inference_state=inference_state,
             base_video_path=tmp_path,
+            sam_frames_dir=sam_frames_dir,
             width=meta.width,
             height=meta.height,
             fps=meta.fps,
@@ -62,10 +71,14 @@ async def start_session(video: UploadFile = File(...)) -> StartSessionResponse:
     except HTTPException:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+        if sam_frames_dir and os.path.isdir(sam_frames_dir):
+            shutil.rmtree(sam_frames_dir, ignore_errors=True)
         raise
     except Exception:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+        if sam_frames_dir and os.path.isdir(sam_frames_dir):
+            shutil.rmtree(sam_frames_dir, ignore_errors=True)
         logger.exception("session creation failed")
         raise HTTPException(status_code=500, detail="failed to create session")
 

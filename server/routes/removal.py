@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import tempfile
 
 from fastapi import APIRouter, HTTPException, Response
@@ -15,7 +16,7 @@ from server.full_foreground_store import full_foreground_store
 from server.mask_store import mask_store
 from server.sam_backend import sam_backend
 from server.session import session_slot
-from server.video_io import probe_video
+from server.video_io import extract_frames_to_jpeg_dir, probe_video
 
 
 router = APIRouter()
@@ -79,12 +80,24 @@ async def remove_foreground() -> Response:
             os.unlink(new_video_path)
         raise HTTPException(status_code=500, detail=str(exc))
 
+    # SAM2 init_state には JPEG ディレクトリを渡す（routes/session.py と同じ理由）
     try:
-        new_inference_state = sam_backend.init_state(video_path=new_video_path)
+        new_sam_frames_dir = await asyncio.to_thread(
+            extract_frames_to_jpeg_dir, new_video_path,
+        )
+    except ValueError as exc:
+        if os.path.exists(new_video_path):
+            os.unlink(new_video_path)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    try:
+        new_inference_state = sam_backend.init_state(video_path=new_sam_frames_dir)
     except Exception:
         logger.exception("init_state failed for new base video")
         if os.path.exists(new_video_path):
             os.unlink(new_video_path)
+        if os.path.isdir(new_sam_frames_dir):
+            shutil.rmtree(new_sam_frames_dir, ignore_errors=True)
         raise HTTPException(
             status_code=500,
             detail="failed to reinitialize SAM state on new base video",
@@ -93,6 +106,7 @@ async def remove_foreground() -> Response:
     new_session = session_slot.swap_base_video(
         new_base_video_path=new_video_path,
         new_inference_state=new_inference_state,
+        new_sam_frames_dir=new_sam_frames_dir,
         width=new_meta.width,
         height=new_meta.height,
         fps=new_meta.fps,

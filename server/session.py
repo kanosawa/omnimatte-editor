@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 class Session:
     inference_state: Any
     base_video_path: str
+    sam_frames_dir: str | None  # SAM2 init_state 用に展開した JPEG ディレクトリ
     width: int
     height: int
     fps: float
@@ -39,6 +41,7 @@ class SessionSlot:
         self,
         inference_state: Any,
         base_video_path: str,
+        sam_frames_dir: str | None,
         width: int,
         height: int,
         fps: float,
@@ -47,6 +50,7 @@ class SessionSlot:
         new_session = Session(
             inference_state=inference_state,
             base_video_path=base_video_path,
+            sam_frames_dir=sam_frames_dir,
             width=width,
             height=height,
             fps=fps,
@@ -64,6 +68,7 @@ class SessionSlot:
         self,
         new_base_video_path: str,
         new_inference_state: Any,
+        new_sam_frames_dir: str | None,
         width: int,
         height: int,
         fps: float,
@@ -71,19 +76,23 @@ class SessionSlot:
     ) -> Session:
         """ベース動画を差し替える（`/remove` 完了時に使う）。
 
-        旧 base video のファイルを削除し、`inference_state` を新値に置き換える。
+        旧 base video のファイルと SAM フレームディレクトリを削除し、
+        `inference_state` を新値に置き換える。
         セッションそのものは維持される（`session_id` などは元から無いが、
         フロントから見て「同じセッションの続き」として扱われる）。
         呼び出し側で `MaskStore.clear()` を別途呼ぶこと。
         """
         old_path: str | None = None
+        old_frames_dir: str | None = None
         with self._lock:
             if self._current is None:
                 raise RuntimeError("no active session to swap base video")
             old_path = self._current.base_video_path
+            old_frames_dir = self._current.sam_frames_dir
             self._current = Session(
                 inference_state=new_inference_state,
                 base_video_path=new_base_video_path,
+                sam_frames_dir=new_sam_frames_dir,
                 width=width,
                 height=height,
                 fps=fps,
@@ -96,6 +105,12 @@ class SessionSlot:
                 os.unlink(old_path)
             except OSError:
                 logger.warning("failed to remove old base video file: %s", old_path)
+        if (
+            old_frames_dir
+            and old_frames_dir != new_sam_frames_dir
+            and os.path.isdir(old_frames_dir)
+        ):
+            shutil.rmtree(old_frames_dir, ignore_errors=True)
         return new_session
 
     def current(self) -> Session | None:
@@ -113,6 +128,8 @@ class SessionSlot:
                 os.unlink(session.base_video_path)
         except OSError:
             logger.warning("failed to remove video file: %s", session.base_video_path)
+        if session.sam_frames_dir and os.path.isdir(session.sam_frames_dir):
+            shutil.rmtree(session.sam_frames_dir, ignore_errors=True)
 
 
 session_slot = SessionSlot()
