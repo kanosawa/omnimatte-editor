@@ -245,6 +245,38 @@ export const useVideoStore = create<VideoStore>((set, get) => {
         await new Promise<void>((resolve) => {
           const onCanPlay = () => {
             videoElement.removeEventListener("canplay", onCanPlay);
+            // Casper sidecar は推論解像度を 16 の倍数に丸めるため、
+            // 元動画の幅が 16 の倍数でないと出力動画の解像度が変わる
+            // （例: 536x288 → 544x288）。新解像度を videoMeta に反映しないと、
+            // CanvasView の useEffect が発火せず、古い PIXI VideoSource が
+            // 新動画上で生き続けて GL texture サイズ不整合 → 画面が真っ黒、
+            // という症状になる。
+            const meta = get().videoMeta;
+            // [DEBUG black-screen] 一時ログ。原因切り分け後に削除する。
+            // eslint-disable-next-line no-console
+            console.log("[remove-debug] onCanPlay", {
+              oldMetaWidth:  meta?.width,
+              oldMetaHeight: meta?.height,
+              videoElementWidth:  videoElement.videoWidth,
+              videoElementHeight: videoElement.videoHeight,
+              readyState: videoElement.readyState,
+              paused: videoElement.paused,
+              duration: videoElement.duration,
+              currentTime: videoElement.currentTime,
+              srcUrl: videoElement.src,
+            });
+            if (meta) {
+              const newW = videoElement.videoWidth  || meta.width;
+              const newH = videoElement.videoHeight || meta.height;
+              if (newW !== meta.width || newH !== meta.height) {
+                // eslint-disable-next-line no-console
+                console.log("[remove-debug] updating videoMeta", { newW, newH });
+                set({ videoMeta: { ...meta, width: newW, height: newH } });
+              } else {
+                // eslint-disable-next-line no-console
+                console.log("[remove-debug] videoMeta unchanged, useEffect won't fire");
+              }
+            }
             try { videoElement.currentTime = restoreTime; } catch { /* ignore */ }
             if (!wasPaused) void videoElement.play();
             resolve();

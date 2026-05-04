@@ -107,8 +107,19 @@ export class VideoCanvas {
       source.on("resize", this.handleSourceResize);
 
       const tex = new PIXI.Texture({ source });
-      this.videoSprite = new PIXI.Sprite(tex);
-      this.videoLayer.addChildAt(this.videoSprite, 0);
+      const sprite = new PIXI.Sprite(tex);
+      this.videoSprite = sprite;
+      // フレームデータが届くまで stage への追加を遅延する。
+      // 早期に追加すると PIXI が空 frame を WebGL にアップロードしようとして
+      // GL_INVALID_OPERATION 警告（"destination level ... must be defined"）が出る。
+      // source.resize は _mediaReady（canplaythrough）で発火するので、それを待つ。
+      const addToStage = () => {
+        if (!this.videoSprite || sprite !== this.videoSprite) return;
+        if (sprite.parent) return;
+        this.videoLayer.addChildAt(sprite, 0);
+      };
+      if (source.isReady) addToStage();
+      else source.once("resize", addToStage);
       // dims（バックエンドが cv2 で返した寸法）を最優先で使う。
       // HTMLVideoElement.videoWidth は SAR を考慮した DAR 寸法を返すため、
       // SAR ≠ 1:1 のアナモルフィック動画ではバックエンドの寸法と食い違う。

@@ -3,6 +3,8 @@ import logging
 import os
 import tempfile
 
+import cv2
+import numpy as np
 from fastapi import APIRouter, HTTPException, Response
 
 from server.casper_client import (
@@ -20,6 +22,45 @@ from server.video_io import probe_video
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _debug_probe_casper_output(path: str, mp4_size: int) -> None:
+    """Casper 出力動画の metadata と各サンプルフレームの平均輝度をログに出す.
+
+    [DEBUG black-screen] 真っ黒問題の切り分け用。原因確定後に削除する。
+    """
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        logger.warning("casper-debug: cannot open %s (size=%d bytes)", path, mp4_size)
+        return
+    try:
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        codec_int = int(cap.get(cv2.CAP_PROP_FOURCC))
+        codec = "".join(chr((codec_int >> (8 * i)) & 0xFF) for i in range(4)) if codec_int else "?"
+        logger.info(
+            "casper-debug: probe path=%s size=%d bytes  cv2=%dx%d fps=%.2f frames=%d codec=%s",
+            path, mp4_size, w, h, fps, n, codec,
+        )
+        # サンプルフレーム: 先頭・中央・末尾の平均輝度を取得（真っ黒なら ~0）
+        samples = sorted(set([0, max(0, n // 2), max(0, n - 1)])) if n > 0 else []
+        for idx in samples:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                logger.warning("casper-debug: failed to read frame %d", idx)
+                continue
+            mean = float(np.mean(frame))
+            std  = float(np.std(frame))
+            logger.info(
+                "casper-debug: frame %3d/%d  shape=%s  mean=%.2f  std=%.2f%s",
+                idx, n, tuple(frame.shape), mean, std,
+                "  (NEAR-BLACK!)" if mean < 5.0 else "",
+            )
+    finally:
+        cap.release()
 
 
 @router.post("/remove")
@@ -70,6 +111,11 @@ async def remove_foreground() -> Response:
     os.close(fd)
     with open(new_video_path, "wb") as f:
         f.write(mp4_bytes)
+
+    # [DEBUG black-screen] Casper 出力を cv2 で probe して metadata + 各フレームの
+    # 平均輝度をログに出す。クラウドで動画ファイルを直接確認できない環境でも、
+    # 「Casper 出力が真っ黒か / 寸法・fps・frame 数が想定通りか」をログだけで判定できる。
+    _debug_probe_casper_output(new_video_path, mp4_size=len(mp4_bytes))
 
     # 新 base video のメタ取得 + SAM inference_state 再構築
     try:
