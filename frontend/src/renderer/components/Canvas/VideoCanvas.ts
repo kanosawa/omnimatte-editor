@@ -19,6 +19,7 @@ export class VideoCanvas {
 
   // Sprites
   private videoSprite: PIXI.Sprite | null = null;
+  private videoSource: PIXI.VideoSource | null = null;
   private bboxGfx = new PIXI.Graphics();
 
   // Interaction
@@ -82,6 +83,12 @@ export class VideoCanvas {
   ): void {
     if (!this.initialized) return;
 
+    // 古い sprite を破棄する前に source の resize リスナーを外しておく
+    // （sprite.destroy({ texture: true }) で source も連鎖破棄されるため）。
+    if (this.videoSource) {
+      this.videoSource.off("resize", this.handleSourceResize);
+      this.videoSource = null;
+    }
     if (this.videoSprite) {
       this.videoLayer.removeChild(this.videoSprite);
       this.videoSprite.destroy({ texture: true });
@@ -91,7 +98,15 @@ export class VideoCanvas {
     if (video) {
       // VideoSource を明示的に構築して autoPlay: false を実際に効かせる。
       const source = new PIXI.VideoSource({ resource: video, autoPlay: false });
-      const tex    = new PIXI.Texture({ source });
+      this.videoSource = source;
+      // 動画のフレームデータが届いたタイミング（PIXI 内部で source.resize が
+      // 走り、texture.orig.width が placeholder の 1 から実寸に切り替わる）で
+      // 再 layout を行う。これがないと sprite.scale が 1×1 ベースで計算された
+      // ままになり、本物のフレーム到着と同時にスプライトが何百倍にも巨大化して
+      // 動画が見えなくなる race condition が発生する。
+      source.on("resize", this.handleSourceResize);
+
+      const tex = new PIXI.Texture({ source });
       this.videoSprite = new PIXI.Sprite(tex);
       this.videoLayer.addChildAt(this.videoSprite, 0);
       // dims（バックエンドが cv2 で返した寸法）を最優先で使う。
@@ -114,6 +129,10 @@ export class VideoCanvas {
     }
     this.layout();
   }
+
+  private handleSourceResize = (): void => {
+    this.layout();
+  };
 
   setBboxInteractive(enabled: boolean): void {
     this.bboxInteractive = enabled;
@@ -141,6 +160,10 @@ export class VideoCanvas {
 
   destroy(): void {
     this.destroyed = true;
+    if (this.videoSource) {
+      this.videoSource.off("resize", this.handleSourceResize);
+      this.videoSource = null;
+    }
     if (this.videoSprite) {
       this.videoLayer.removeChild(this.videoSprite);
       this.videoSprite.destroy({ texture: true });
