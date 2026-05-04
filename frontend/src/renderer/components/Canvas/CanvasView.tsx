@@ -36,14 +36,6 @@ export function CanvasView() {
       videoMeta && videoMeta.width > 0 && videoMeta.height > 0
         ? { width: videoMeta.width, height: videoMeta.height }
         : null;
-    // [DEBUG black-screen] 一時ログ。原因切り分け後に削除する。
-    // eslint-disable-next-line no-console
-    console.log("[canvas-debug] useEffect fired -> setVideo", {
-      hasVideoElement: !!videoElement,
-      videoElementWidth:  videoElement?.videoWidth,
-      videoElementHeight: videoElement?.videoHeight,
-      dims,
-    });
     canvasRef.current?.setVideo(videoElement, dims);
   }, [videoElement, videoMeta?.width, videoMeta?.height]);
 

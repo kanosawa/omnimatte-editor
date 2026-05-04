@@ -83,28 +83,43 @@ export class VideoCanvas {
   ): void {
     if (!this.initialized) return;
 
-    // 古い sprite を破棄する前に source の resize リスナーを外しておく
-    // （sprite.destroy({ texture: true }) で source も連鎖破棄されるため）。
-    if (this.videoSource) {
-      this.videoSource.off("resize", this.handleSourceResize);
-      this.videoSource = null;
-    }
+    // 古い sprite と Texture だけ破棄する（VideoSource は使い回す）。
+    // PIXI の VideoSource.destroy は内部で `videoElement.src = ""; load();` を
+    // 呼ぶ設計（PIXI が videoElement の所有者だと前提）。我々は videoStore で
+    // videoElement をシングルトン共有しているため、destroy するとシングルトンの
+    // src が消えてしまい、その直後にロードする新動画が error イベントを起こす。
+    // 解決策: VideoSource は videoElement と 1:1 で生かしたまま、texture/sprite
+    // だけ毎回作り直す（{ texture: true } は textureSource を巻き込まない）。
     if (this.videoSprite) {
       this.videoLayer.removeChild(this.videoSprite);
       this.videoSprite.destroy({ texture: true });
       this.videoSprite = null;
     }
 
+    // 紐づく videoElement が変わった場合（実際にはシングルトンなので発生しない
+    // が念のため）、古い VideoSource からは離脱する。
+    if (this.videoSource && video && this.videoSource.resource !== video) {
+      this.videoSource.off("resize", this.handleSourceResize);
+      this.videoSource = null;
+    }
+    if (!video && this.videoSource) {
+      this.videoSource.off("resize", this.handleSourceResize);
+      this.videoSource = null;
+    }
+
     if (video) {
-      // VideoSource を明示的に構築して autoPlay: false を実際に効かせる。
-      const source = new PIXI.VideoSource({ resource: video, autoPlay: false });
-      this.videoSource = source;
-      // 動画のフレームデータが届いたタイミング（PIXI 内部で source.resize が
-      // 走り、texture.orig.width が placeholder の 1 から実寸に切り替わる）で
-      // 再 layout を行う。これがないと sprite.scale が 1×1 ベースで計算された
-      // ままになり、本物のフレーム到着と同時にスプライトが何百倍にも巨大化して
-      // 動画が見えなくなる race condition が発生する。
-      source.on("resize", this.handleSourceResize);
+      // VideoSource は videoElement に対して 1 個だけ生成・以後は使い回す。
+      if (!this.videoSource) {
+        const source = new PIXI.VideoSource({ resource: video, autoPlay: false });
+        this.videoSource = source;
+        // 動画のフレームデータが届いたタイミング（PIXI 内部で source.resize が
+        // 走り、texture.orig.width が placeholder の 1 から実寸に切り替わる）で
+        // 再 layout を行う。これがないと sprite.scale が 1×1 ベースで計算された
+        // ままになり、本物のフレーム到着と同時にスプライトが何百倍にも巨大化して
+        // 動画が見えなくなる race condition が発生する。
+        source.on("resize", this.handleSourceResize);
+      }
+      const source = this.videoSource;
 
       const tex = new PIXI.Texture({ source });
       const sprite = new PIXI.Sprite(tex);
@@ -112,7 +127,8 @@ export class VideoCanvas {
       // フレームデータが届くまで stage への追加を遅延する。
       // 早期に追加すると PIXI が空 frame を WebGL にアップロードしようとして
       // GL_INVALID_OPERATION 警告（"destination level ... must be defined"）が出る。
-      // source.resize は _mediaReady（canplaythrough）で発火するので、それを待つ。
+      // source が既に ready ならその場で追加、そうでなければ resize（_mediaReady
+      // で発火）を待つ。
       const addToStage = () => {
         if (!this.videoSprite || sprite !== this.videoSprite) return;
         if (sprite.parent) return;
@@ -177,6 +193,9 @@ export class VideoCanvas {
     }
     if (this.videoSprite) {
       this.videoLayer.removeChild(this.videoSprite);
+      // textureSource: true は付けない（VideoSource.destroy が videoElement.src を
+      // クリアしてしまう。videoElement は videoStore のシングルトンで、Canvas 破棄
+      // 後も生かしておく必要があるため）。
       this.videoSprite.destroy({ texture: true });
       this.videoSprite = null;
     }
