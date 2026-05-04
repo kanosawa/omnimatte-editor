@@ -76,7 +76,10 @@ export class VideoCanvas {
 
   // -------------- Public API --------------
 
-  setVideo(video: HTMLVideoElement | null): void {
+  setVideo(
+    video: HTMLVideoElement | null,
+    dims?: { width: number; height: number } | null,
+  ): void {
     if (!this.initialized) return;
 
     if (this.videoSprite) {
@@ -91,12 +94,19 @@ export class VideoCanvas {
       const tex    = new PIXI.Texture({ source });
       this.videoSprite = new PIXI.Sprite(tex);
       this.videoLayer.addChildAt(this.videoSprite, 0);
+      // dims（バックエンドが cv2 で返した寸法）を最優先で使う。
+      // HTMLVideoElement.videoWidth は SAR を考慮した DAR 寸法を返すため、
+      // SAR ≠ 1:1 のアナモルフィック動画ではバックエンドの寸法と食い違う。
+      // 食い違ったままだと bbox 座標系がずれて SAM2 が誤った位置を切る。
       const applySize = () => {
-        this.videoWidth  = video.videoWidth  || this.videoWidth;
-        this.videoHeight = video.videoHeight || this.videoHeight;
+        const w = dims?.width  ?? video.videoWidth;
+        const h = dims?.height ?? video.videoHeight;
+        this.videoWidth  = w || this.videoWidth;
+        this.videoHeight = h || this.videoHeight;
         this.layout();
       };
-      if (video.readyState >= 1) applySize();
+      if (dims?.width && dims?.height) applySize();
+      else if (video.readyState >= 1) applySize();
       else video.addEventListener("loadedmetadata", applySize, { once: true });
     } else {
       this.videoWidth  = 0;

@@ -29,8 +29,14 @@ export function CanvasView() {
   }, [setBbox]);
 
   // 動画の差し替え (loadVideo / runSegment 後の合成動画)
+  // dims は bbox 座標系をバックエンドの cv2 寸法に揃えるために必須
+  // （HTMLVideoElement.videoWidth は SAR 補正後の DAR 寸法で食い違うことがある）
   useEffect(() => {
-    canvasRef.current?.setVideo(videoElement);
+    const dims =
+      videoMeta && videoMeta.width > 0 && videoMeta.height > 0
+        ? { width: videoMeta.width, height: videoMeta.height }
+        : null;
+    canvasRef.current?.setVideo(videoElement, dims);
   }, [videoElement, videoMeta?.width, videoMeta?.height]);
 
   // BBox 操作可否
