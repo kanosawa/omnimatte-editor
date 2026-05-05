@@ -15,7 +15,7 @@ export function Sam2Button() {
 
   const enabled = isLoaded && !isPlaying && bbox !== null && !isRunning && !isRemoving;
 
-  const label = isRunning ? "処理中…" : "SAM2 で検出";
+  const label = isRunning ? "物体検出中…" : "物体検出";
 
   return (
     <div className="topbar-group">

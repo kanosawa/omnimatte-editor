@@ -54,5 +54,21 @@ export function CanvasView() {
     canvasRef.current?.setBboxDisplay(bbox);
   }, [bbox]);
 
-  return <div ref={containerRef} className="canvas-host" />;
+  // 処理中オーバーレイ。物体検出 (SAM2) / 物体除去のいずれかが走っている間、
+  // 動画全体をグレー半透過で覆い、左上にスピナーとラベルを表示する。
+  const overlayLabel =
+    segmentState === "running" ? "物体検出中…"
+    : removeState === "running" ? "物体除去中…"
+    : null;
+
+  return (
+    <div ref={containerRef} className="canvas-host">
+      {overlayLabel && (
+        <div className="canvas-overlay">
+          <div className="canvas-spinner" />
+          <div className="canvas-overlay-label">{overlayLabel}</div>
+        </div>
+      )}
+    </div>
+  );
 }

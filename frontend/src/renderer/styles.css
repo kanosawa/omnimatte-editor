@@ -110,6 +110,44 @@ body,
   display: block;
 }
 
+/* 処理中オーバーレイ */
+.canvas-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 10;
+  /* デフォルトの pointer-events: auto で canvas へのクリックを遮断する */
+}
+
+.canvas-spinner {
+  position: absolute;
+  top: 24px;
+  left: 24px;
+  width: 56px;
+  height: 56px;
+  border: 6px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #ff3344;
+  border-radius: 50%;
+  animation: canvas-spinner-rotate 0.8s linear infinite;
+}
+
+.canvas-overlay-label {
+  position: absolute;
+  top: 24px;
+  left: 100px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  color: #ff3344;
+  font-size: 28px;
+  font-weight: 700;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.7);
+}
+
+@keyframes canvas-spinner-rotate {
+  to { transform: rotate(360deg); }
+}
+
 /* ---------- BottomBar ---------- */
 .bottombar {
   display: flex;

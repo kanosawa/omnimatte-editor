@@ -17,7 +17,7 @@ export function RemoveForegroundButton() {
   const enabled =
     isLoaded && isPlaying && hasSegmentation && !isSegmenting && !isRemoving;
 
-  const label = isRemoving ? "処理中…" : "前景を削除";
+  const label = isRemoving ? "物体除去中…" : "物体除去";
 
   return (
     <div className="topbar-group">
