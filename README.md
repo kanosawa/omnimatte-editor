@@ -83,3 +83,7 @@ ssh -p <SSH_PORT> -N -L 8000:127.0.0.1:9000 user@gpu-server
 > Casper sidecar（GPU マシン内部の `127.0.0.1:8765`）は本サーバが内部で呼ぶため、SSH トンネルは `8000` だけで OK。
 
 フロント側は `frontend/.env` の `VITE_API_BASE` をサーバ URL に設定する。詳細は [frontend/README.md](frontend/README.md)。
+
+モデルDL
+hf download alibaba-pai/Wan2.1-Fun-1.3B-InP --local-dir models/Diffusion_Transformer/Wan2.1-Fun-1.3B-InP
+gdown "1n3Sv4d0pbTjfa5UhypEhTaylrSy2X4C1" -O models/Casper/wan2.1_fun_1.3b_casper.safetensors
