@@ -1,10 +1,19 @@
-"""gen-omnimatte-public のパイプラインを `absl` 非依存に再実装したラッパ。
+"""gen-omnimatte-public のパイプラインを呼ぶ薄いラッパ。
 
-`vendor/gen-omnimatte-public/inference/wan2.1_fun/predict_v2v.py` の
-`load_pipeline` / `run_inference` 相当を、本サーバ・sidecar から import 可能な
-プレーンな関数として提供する。`predict_v2v.py` は import するだけで
-`absl.flags` を介してグローバル CLI フラグを登録するため、ここからは import しない。
+`vendor/gen-omnimatte-public/inference/wan2.1_fun/predict_v2v.py` を fork 済
+（absl 系が `if __name__ == "__main__"` 内に閉じ込められ、`config_path` /
+`model_name` が `__file__` 相対の絶対パスに解決される）の前提で、その
+`load_pipeline` を直接呼ぶ。
+
+`predict_v2v.py` のディレクトリ名 `wan2.1_fun` にドットが含まれるため
+通常の `from ... import` 構文では取り込めない。`importlib` でファイル
+パスから直接ロードする。
+
+`run_one_seq` は本プロジェクト固有の出力フォーマット・前景のみ書き換え
+処理・末尾フレームのトリミング等を含むため、上流の `run_inference` には
+置き換えず、`load_pipeline` で得たパイプラインを使って独自に実装する。
 """
+import importlib.util
 import logging
 import os
 import sys
@@ -12,7 +21,6 @@ import uuid
 
 import numpy as np
 import torch
-from omegaconf import OmegaConf
 
 from server.model import (
     CASPER_FPS,
@@ -52,129 +60,40 @@ def build_default_config():
     return cfg
 
 
-def load_pipeline(cfg):
-    """`predict_v2v.load_pipeline` 相当。`absl` を使わず純粋に cfg だけで動かす。"""
+_predict_v2v_module = None
+
+
+def _get_predict_v2v():
+    """`inference/wan2.1_fun/predict_v2v.py` を遅延ロードして返す。
+
+    `wan2.1_fun` ディレクトリ名にドットを含むため通常の import 構文が
+    使えない。`importlib.util` でファイルパスから直接モジュールを生成する。
+    一度ロードしたらモジュールスコープにキャッシュして再利用する。
+    """
+    global _predict_v2v_module
+    if _predict_v2v_module is not None:
+        return _predict_v2v_module
+
     _ensure_repo_on_path()
+    path = os.path.join(CASPER_REPO_DIR, "inference", "wan2.1_fun", "predict_v2v.py")
+    spec = importlib.util.spec_from_file_location("_casper_predict_v2v", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"failed to load predict_v2v from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _predict_v2v_module = module
+    return module
 
-    from diffusers import FlowMatchEulerDiscreteScheduler
-    from transformers import AutoTokenizer
-    from videox_fun.dist import set_multi_gpus_devices
-    from videox_fun.models import (AutoencoderKLWan, CLIPModel,
-                                   WanT5EncoderModel, WanTransformer3DModel)
-    from videox_fun.models.cache_utils import get_teacache_coefficients
-    from videox_fun.pipeline import WanFunInpaintPipeline
-    from videox_fun.utils.fp8_optimization import (
-        convert_model_weight_to_float8, convert_weight_dtype_wrapper,
-        replace_parameters_by_name)
-    from videox_fun.utils.lora_utils import merge_lora
-    from videox_fun.utils.utils import filter_kwargs
 
-    model_name = cfg.video_model.model_name
-    weight_dtype = cfg.system.weight_dtype
-    config_model = OmegaConf.load(
-        os.path.join(CASPER_REPO_DIR, cfg.video_model.config_path)
-    )
-    device = set_multi_gpus_devices(cfg.system.ulysses_degree, cfg.system.ring_degree)
+def load_pipeline(cfg):
+    """gen-omnimatte-public の `predict_v2v.load_pipeline` を直接呼ぶ薄いラッパ。
 
-    # 重みなどはリポジトリの相対パスで指定されているので、cwd を合わせる必要がある
-    prev_cwd = os.getcwd()
-    os.chdir(CASPER_REPO_DIR)
-    try:
-        transformer = WanTransformer3DModel.from_pretrained(
-            os.path.join(model_name, config_model['transformer_additional_kwargs'].get('transformer_subpath', 'transformer')),
-            transformer_additional_kwargs=OmegaConf.to_container(config_model['transformer_additional_kwargs']),
-            low_cpu_mem_usage=True,
-            torch_dtype=weight_dtype,
-        )
-
-        if cfg.video_model.transformer_path:
-            logger.info("loading casper transformer from %s", cfg.video_model.transformer_path)
-            if cfg.video_model.transformer_path.endswith("safetensors"):
-                from safetensors.torch import load_file
-                state_dict = load_file(cfg.video_model.transformer_path)
-            else:
-                state_dict = torch.load(cfg.video_model.transformer_path, map_location="cpu")
-            state_dict = state_dict["state_dict"] if "state_dict" in state_dict else state_dict
-            m, u = transformer.load_state_dict(state_dict, strict=False)
-            logger.info("transformer missing=%d unexpected=%d", len(m), len(u))
-
-        vae = AutoencoderKLWan.from_pretrained(
-            os.path.join(model_name, config_model['vae_kwargs'].get('vae_subpath', 'vae')),
-            additional_kwargs=OmegaConf.to_container(config_model['vae_kwargs']),
-        ).to(weight_dtype)
-
-        if cfg.video_model.vae_path:
-            from safetensors.torch import load_file
-            state_dict = (
-                load_file(cfg.video_model.vae_path)
-                if cfg.video_model.vae_path.endswith("safetensors")
-                else torch.load(cfg.video_model.vae_path, map_location="cpu")
-            )
-            state_dict = state_dict["state_dict"] if "state_dict" in state_dict else state_dict
-            vae.load_state_dict(state_dict, strict=False)
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            os.path.join(model_name, config_model['text_encoder_kwargs'].get('tokenizer_subpath', 'tokenizer')),
-        )
-
-        text_encoder = WanT5EncoderModel.from_pretrained(
-            os.path.join(model_name, config_model['text_encoder_kwargs'].get('text_encoder_subpath', 'text_encoder')),
-            additional_kwargs=OmegaConf.to_container(config_model['text_encoder_kwargs']),
-            low_cpu_mem_usage=True,
-            torch_dtype=weight_dtype,
-        ).eval()
-
-        clip_image_encoder = CLIPModel.from_pretrained(
-            os.path.join(model_name, config_model['image_encoder_kwargs'].get('image_encoder_subpath', 'image_encoder')),
-        ).to(weight_dtype).eval()
-
-        scheduler_cls = {"Flow": FlowMatchEulerDiscreteScheduler}[cfg.video_model.sampler_name]
-        scheduler = scheduler_cls(
-            **filter_kwargs(scheduler_cls, OmegaConf.to_container(config_model['scheduler_kwargs']))
-        )
-
-        pipeline = WanFunInpaintPipeline(
-            transformer=transformer,
-            vae=vae,
-            tokenizer=tokenizer,
-            text_encoder=text_encoder,
-            scheduler=scheduler,
-            clip_image_encoder=clip_image_encoder,
-        )
-        if cfg.system.ulysses_degree > 1 or cfg.system.ring_degree > 1:
-            transformer.enable_multi_gpus_inference()
-
-        if cfg.system.gpu_memory_mode == "sequential_cpu_offload":
-            replace_parameters_by_name(transformer, ["modulation"], device=device)
-            transformer.freqs = transformer.freqs.to(device=device)
-            pipeline.enable_sequential_cpu_offload(device=device)
-        elif cfg.system.gpu_memory_mode == "model_cpu_offload_and_qfloat8":
-            convert_model_weight_to_float8(transformer, exclude_module_name=["modulation"])
-            convert_weight_dtype_wrapper(transformer, weight_dtype)
-            pipeline.enable_model_cpu_offload(device=device)
-        elif cfg.system.gpu_memory_mode == "model_cpu_offload":
-            pipeline.enable_model_cpu_offload(device=device)
-        else:
-            pipeline.to(device=device)
-
-        coefficients = get_teacache_coefficients(model_name) if cfg.system.enable_teacache else None
-        if coefficients is not None:
-            pipeline.transformer.enable_teacache(
-                coefficients,
-                cfg.video_model.num_inference_steps,
-                cfg.system.teacache_threshold,
-                num_skip_start_steps=cfg.system.num_skip_start_steps,
-                offload=cfg.system.teacache_offload,
-            )
-
-        generator = torch.Generator(device=device).manual_seed(cfg.system.seed)
-
-        if cfg.video_model.lora_path:
-            pipeline = merge_lora(pipeline, cfg.video_model.lora_path, cfg.video_model.lora_weight)
-    finally:
-        os.chdir(prev_cwd)
-
-    return pipeline, vae, generator
+    fork 済 `predict_v2v.py` は absl 系が `if __name__ == "__main__"` に閉じ
+    込められているので、import 副作用なしで取り込める。`cfg.video_model.config_path` /
+    `cfg.video_model.model_name` も `default_wan.get_config()` で `__file__`
+    相対の絶対パスに解決済みなので、`os.chdir` は不要。
+    """
+    return _get_predict_v2v().load_pipeline(cfg)
 
 
 @torch.no_grad()
