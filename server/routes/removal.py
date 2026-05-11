@@ -13,7 +13,7 @@ from server.casper import (
 )
 from server.full_foreground_store import full_foreground_store
 from server.mask_store import mask_store
-from server.sam_backend import sam_backend
+from server.sam import sam2
 from server.session import session_slot
 from server.video_io import probe_video
 
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 @router.post("/remove")
 async def remove_foreground() -> Response:
     try:
-        await sam_backend.wait_ready(timeout=5.0)
+        await sam2.wait_ready(timeout=5.0)
     except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except RuntimeError as exc:
@@ -80,7 +80,7 @@ async def remove_foreground() -> Response:
         raise HTTPException(status_code=500, detail=str(exc))
 
     try:
-        new_inference_state = sam_backend.init_state(video_path=new_video_path)
+        new_inference_state = sam2.init_state(video_path=new_video_path)
     except Exception:
         logger.exception("init_state failed for new base video")
         if os.path.exists(new_video_path):

@@ -65,7 +65,7 @@
 
 ### 参照実装
 
-`vendor/sam2/examples/segment_video_server.py` を出発点とし、API 形状とマスク返却方式を本仕様に合わせて改修する（詳細は [03-backend.md](03-backend.md) と [04-api.md](04-api.md)）。
+SAM2 公式リポジトリの [`examples/segment_video_server.py`](https://github.com/facebookresearch/sam2/blob/main/examples/segment_video_server.py) を出発点とし、API 形状とマスク返却方式を本仕様に合わせて改修する（詳細は [03-backend.md](03-backend.md) と [04-api.md](04-api.md)）。
 
 ## 1.5 動作モード
 
@@ -97,6 +97,6 @@
 ## 1.7 実装チェックリスト
 
 - [ ] Node.js / Python の必要バージョンが README に明記されている
-- [ ] `frontend/`, `server/`, `vendor/sam2/` のディレクトリ構造が [02-architecture.md](02-architecture.md) と一致
+- [ ] `frontend/`, `server/`, `models/sam2/` のディレクトリ構造が [02-architecture.md](02-architecture.md) と一致
 - [ ] バックエンドは起動直後にモデルロードがバックグラウンドで開始される
 - [ ] フロントエンドの `VITE_API_BASE` でバックエンドURLが切り替えられる

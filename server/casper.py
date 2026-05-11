@@ -1,6 +1,6 @@
 """Casper（前景削除）を本サーバプロセス内で実行するためのモジュール。
 
-ロード状態管理（`CasperHolder`）、同時実行制御（`run_lock`）、出力 mp4 の
+ロード状態管理（`Casper` クラス）、同時実行制御（`run_lock`）、出力 mp4 の
 キャッシュ（`OutputCache`）、推論本体（`do_pipeline_run`）、および
 ルート（`/segment`、`/remove`）から呼ばれる高レベル API
 （`run_casper` / `preload_casper` / `get_casper_state`）を集約する。
@@ -58,8 +58,8 @@ class CasperRunError(Exception):
 CasperState = Literal["loading", "ready", "failed"]
 
 
-class CasperHolder:
-    """Casper パイプラインのロード状態管理。SAM2 の `ModelHolder` と同パターン。"""
+class Casper:
+    """Casper パイプラインのロード状態管理。"""
 
     def __init__(self) -> None:
         self._state: CasperState = "loading"
@@ -131,7 +131,7 @@ class CasperHolder:
             raise CasperNotReadyError(f"casper failed to load: {self._error}")
 
 
-casper_holder = CasperHolder()
+casper = Casper()
 
 
 # ============================================================================
@@ -234,10 +234,10 @@ def _do_pipeline_run(
             json.dump({"bg": prompt or CASPER_DEFAULT_PROMPT}, f)
 
         out_path = run_one_seq(
-            casper_holder.cfg,
-            casper_holder.pipeline,
-            casper_holder.vae,
-            casper_holder.generator,
+            casper.cfg,
+            casper.pipeline,
+            casper.vae,
+            casper.generator,
             seq_dir,
             save_dir,
             sample_size,
@@ -255,7 +255,7 @@ def _do_pipeline_run(
 
 def get_casper_state() -> str:
     """`/health` から参照される現在の Casper ロード状態。"""
-    return casper_holder.state
+    return casper.state
 
 
 async def run_casper(
@@ -274,7 +274,7 @@ async def run_casper(
     一時ファイルは関数内で作成・削除する。`preload_casper` で先回り計算済みなら
     `output_cache` から即返す。
     """
-    await casper_holder.wait_ready(timeout=CASPER_STARTUP_TIMEOUT_SEC)
+    await casper.wait_ready(timeout=CASPER_STARTUP_TIMEOUT_SEC)
 
     fd, trimask_path = tempfile.mkstemp(prefix="casper_trimask_", suffix=".mp4")
     os.close(fd)
@@ -344,9 +344,9 @@ async def preload_casper(
     「前景削除」ボタンを押すまでの裏で計算を済ませ、`run_casper` のキャッシュ
     ヒットを狙う。失敗しても例外を投げず、ログだけ残す。
     """
-    # casper_holder が ready でないなら何もしない（後で run_casper が来たときに動く）
-    if casper_holder.state != "ready":
-        logger.info("preload skipped: casper_state=%s", casper_holder.state)
+    # casper が ready でないなら何もしない（後で run_casper が来たときに動く）
+    if casper.state != "ready":
+        logger.info("preload skipped: casper_state=%s", casper.state)
         return
 
     fd, trimask_path = tempfile.mkstemp(prefix="casper_preload_trimask_", suffix=".mp4")

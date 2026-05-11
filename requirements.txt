@@ -1,4 +1,3 @@
--e ./vendor/sam2
 fastapi
 uvicorn[standard]
 python-multipart
@@ -10,10 +9,10 @@ decord
 huggingface_hub
 gdown
 
-# 物体検出（COCO Mask R-CNN）。pip での直接インストールは git+ URL 経由。
-# Detectron2 の setup.py は import 時に torch を要求するため、build isolation を切る必要がある
-# （torch は本 requirements.txt の他依存で既に入っている前提）:
+# SAM2 と Detectron2 は git+ URL から直接インストールする（README 参照）。
+# どちらも setup.py が import 時に torch を要求するため、build isolation を切る必要がある:
 #   pip install --upgrade pip setuptools wheel ninja
+#   pip install --no-build-isolation 'git+https://github.com/facebookresearch/sam2.git@2b90b9f'
 #   pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
 
 # Casper sidecar 用（gen-omnimatte-public 依存。gradio / tensorboard / ray /

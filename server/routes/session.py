@@ -7,10 +7,10 @@ import tempfile
 import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from server.detector import detector_holder
+from server.detector import detectron2
 from server.full_foreground_store import full_foreground_store
 from server.mask_store import mask_store
-from server.sam_backend import sam_backend
+from server.sam import sam2
 from server.schemas import StartSessionResponse, VideoMeta
 from server.session import Session, session_slot
 from server.video_io import probe_video, read_frame_at
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 @router.post("/session", response_model=StartSessionResponse)
 async def start_session(video: UploadFile = File(...)) -> StartSessionResponse:
     try:
-        await sam_backend.wait_ready(timeout=5.0)
+        await sam2.wait_ready(timeout=5.0)
     except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except RuntimeError as exc:
@@ -42,7 +42,7 @@ async def start_session(video: UploadFile = File(...)) -> StartSessionResponse:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
-        inference_state = sam_backend.init_state(video_path=tmp_path)
+        inference_state = sam2.init_state(video_path=tmp_path)
 
         session = session_slot.replace(
             inference_state=inference_state,
@@ -89,14 +89,14 @@ async def _extract_full_foreground(session: Session) -> None:
     """
     base_video_path = session.base_video_path
     try:
-        await detector_holder.wait_ready(timeout=30.0)
+        await detectron2.wait_ready(timeout=30.0)
 
         # 中間フレームを BGR で取得
         middle_frame_idx = session.num_frames // 2
         frame_bgr = await asyncio.to_thread(read_frame_at, base_video_path, middle_frame_idx)
 
         # Detectron2 で物体検出（class-agnostic）
-        detected_masks = await asyncio.to_thread(detector_holder.detect, frame_bgr)
+        detected_masks = await asyncio.to_thread(detectron2.detect, frame_bgr)
         logger.info("R-CNN detected %d objects on frame %d", len(detected_masks), middle_frame_idx)
 
         # 検出 0 のときも空リストを保持して ready 状態に遷移
@@ -139,24 +139,24 @@ def _propagate_detected_masks(
         np.zeros((n_frames, h, w), dtype=bool) for _ in range(n_objects)
     ]
 
-    sam_backend.reset_state(state)
+    sam2.reset_state(state)
     for obj_id, mask in enumerate(detected_masks):
-        sam_backend.add_mask(
+        sam2.add_mask(
             state=state, frame_idx=keyframe_idx, obj_id=obj_id, mask=mask,
         )
 
-    for frame_idx, obj_ids, masks in sam_backend.propagate(
+    for frame_idx, obj_ids, masks in sam2.propagate(
         state, start_frame_idx=keyframe_idx, num_frames=n_frames,
     ):
         for i, obj_id in enumerate(obj_ids):
             per_object[obj_id][frame_idx] = masks[i]
-    for frame_idx, obj_ids, masks in sam_backend.propagate(
+    for frame_idx, obj_ids, masks in sam2.propagate(
         state, start_frame_idx=keyframe_idx, num_frames=n_frames, reverse=True,
     ):
         for i, obj_id in enumerate(obj_ids):
             per_object[obj_id][frame_idx] = masks[i]
 
     # /segment が後でクリーンな state を使えるように reset
-    sam_backend.reset_state(state)
+    sam2.reset_state(state)
 
     return per_object

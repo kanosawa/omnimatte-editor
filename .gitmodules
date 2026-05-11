@@ -1,6 +1,3 @@
-[submodule "vendor/sam2"]
-	path = vendor/sam2
-	url = https://github.com/facebookresearch/sam2
 [submodule "vendor/gen-omnimatte-public"]
 	path = vendor/gen-omnimatte-public
 	url = https://github.com/kanosawa/gen-omnimatte-public

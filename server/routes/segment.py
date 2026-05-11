@@ -8,7 +8,7 @@ from server.casper import preload_casper
 from server.full_foreground_store import full_foreground_store
 from server.mask_store import mask_store
 from server.model import DETECTRON2_IOU_WITH_TARGET
-from server.sam_backend import sam_backend
+from server.sam import sam2
 from server.schemas import SegmentRequest
 from server.session import session_slot
 from server.video_io import composite_overlay_to_mp4
@@ -30,7 +30,7 @@ TRIMASK_KEEP = 255      # 他の前景（残す）
 @router.post("/segment")
 async def segment(req: SegmentRequest) -> Response:
     try:
-        await sam_backend.wait_ready(timeout=5.0)
+        await sam2.wait_ready(timeout=5.0)
     except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except RuntimeError as exc:
@@ -75,8 +75,8 @@ async def segment(req: SegmentRequest) -> Response:
         # 1. backend に bbox プロンプトを登録（video predictor の
         #    add_new_points_or_box に bbox を直接渡す）。
         #    呼び出し側はリセットしてから登録 → 順 / 逆 propagate するだけ。
-        sam_backend.reset_state(state)
-        sam_backend.add_bbox_prompt(
+        sam2.reset_state(state)
+        sam2.add_bbox_prompt(
             state=state,
             frame_idx=req.frame_idx,
             obj_id=0,
@@ -86,11 +86,11 @@ async def segment(req: SegmentRequest) -> Response:
             width=session.width,
         )
 
-        for frame_idx, _obj_ids, masks in sam_backend.propagate(
+        for frame_idx, _obj_ids, masks in sam2.propagate(
             state, start_frame_idx=req.frame_idx, num_frames=session.num_frames,
         ):
             results[frame_idx] = masks[0]
-        for frame_idx, _obj_ids, masks in sam_backend.propagate(
+        for frame_idx, _obj_ids, masks in sam2.propagate(
             state, start_frame_idx=req.frame_idx, num_frames=session.num_frames, reverse=True,
         ):
             results[frame_idx] = masks[0]

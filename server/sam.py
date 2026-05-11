@@ -1,6 +1,6 @@
-"""SAM2 backend 実装.
+"""SAM2 video predictor wrapper.
 
-`vendor/sam2` の `Sam2VideoPredictor` をラップする。
+`sam2` パッケージ（pip install 経由）の `Sam2VideoPredictor` をラップする。
 `add_bbox_prompt` は video predictor の `add_new_points_or_box` に bbox を直接渡し、
 返ってきた `video_res_masks`（元解像度 logits）を bool 化して返す。SAM2 が想定する
 正規の box prompt パスを使うことで、prompt embedding が memory bank に正しく入る。
@@ -13,19 +13,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 
 import numpy as np
 import torch
 
 from server.model import SAM2_CFG, SAM2_CKPT, SAM2_DEVICE
-from server.sam_backend.base import ModelState, PropagateItem, SamBackend
 
 
 logger = logging.getLogger(__name__)
 
 
-class Sam2Backend(SamBackend):
+ModelState = Literal["loading", "ready", "failed"]
+
+
+PropagateItem = tuple[int, list[int], list[np.ndarray]]
+"""propagate() の yield 単位。
+
+- frame_idx: フレーム番号
+- obj_ids: そのフレームで結果が得られた object_id のリスト
+- masks: 各 obj_id に対応する bool[H, W] マスク（base video 解像度）
+"""
+
+
+class Sam2:
     def __init__(self) -> None:
         self._state: ModelState = "loading"
         self._predictor = None
@@ -150,3 +161,6 @@ class Sam2Backend(SamBackend):
                     (mask_logits[i, 0] > 0.0).cpu().numpy() for i in range(len(obj_ids))
                 ]
                 yield int(frame_idx), [int(x) for x in obj_ids], masks
+
+
+sam2 = Sam2()

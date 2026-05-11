@@ -8,9 +8,8 @@ _here = os.path.dirname(os.path.abspath(__file__))
 _project_root = os.path.dirname(_here)
 
 # ---------- SAM2 ----------
-_sam2_dir = os.path.join(_project_root, "vendor", "sam2")
 SAM2_CFG = "configs/sam2.1/sam2.1_hiera_l.yaml"
-SAM2_CKPT = os.path.join(_sam2_dir, "checkpoints/sam2.1_hiera_large.pt")
+SAM2_CKPT = os.path.join(_project_root, "models", "sam2", "sam2.1_hiera_large.pt")
 SAM2_DEVICE = "cuda"
 
 # ---------- Casper（gen-omnimatte-public, Wan2.1-Fun-1.3B-InP）----------
@@ -43,5 +42,5 @@ FG_REPLACE_DIFF_THRESHOLD = int(os.environ.get("OMNIMATTE_FG_REPLACE_DIFF_THRESH
 # SAM2 マスクの dilate 量（ピクセル）。Casper の cfg.data.dilate_width=11 と一致
 FG_REPLACE_MASK_DILATE = int(os.environ.get("OMNIMATTE_FG_REPLACE_MASK_DILATE", "11"))
 
-# /remove で casper_holder.wait_ready を待つ最大秒数（SAM と統一）
+# /remove で casper.wait_ready を待つ最大秒数（SAM と統一）
 CASPER_STARTUP_TIMEOUT_SEC = float(os.environ.get("CASPER_STARTUP_TIMEOUT_SEC", "5.0"))

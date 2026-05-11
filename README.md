@@ -13,7 +13,7 @@
 
 ### 依存パッケージのインストール
 
-**順序が重要**: 先に `requirements.txt`（冒頭で torch を CUDA 12.4 wheel に固定済み）→ 続いて Detectron2 をビルド、という順で入れる。これを逆順にすると、Detectron2 が古い torch を持ち込んだ後に他依存が「より新しい torch」を要求してアップグレードチェーンが走り、**CUDA 12 系と 13 系の nvidia-* ライブラリが混在してパフォーマンスが激しく劣化**する（cuDNN/cuBLAS の不整合で SDPA が math fallback に落ち、Casper の 1 diffusion step が秒単位で遅くなる）。
+**順序が重要**: 先に `requirements.txt`（冒頭で torch を CUDA 12.4 wheel に固定済み）→ 続いて SAM2 と Detectron2 をビルド、という順で入れる。これを逆順にすると、SAM2/Detectron2 が古い torch を持ち込んだ後に他依存が「より新しい torch」を要求してアップグレードチェーンが走り、**CUDA 12 系と 13 系の nvidia-* ライブラリが混在してパフォーマンスが激しく劣化**する（cuDNN/cuBLAS の不整合で SDPA が math fallback に落ち、Casper の 1 diffusion step が秒単位で遅くなる）。
 
 ```bash
 # 0. (推奨) 既存の torch / nvidia-* 系を一度クリーンにする
@@ -25,14 +25,15 @@ pip uninstall -y torch torchvision torchaudio \
 pip install --upgrade pip setuptools wheel ninja
 pip install -r requirements.txt
 
-# 2. Detectron2 を git+ URL から手動でビルド。
+# 2. SAM2 を git+ URL から手動でビルド（C++ 拡張 sam2._C を含む）。
 #    setup.py が import 時に torch を要求するため build isolation を切る。
+#    再現性のため commit を pin する。
+pip install --no-build-isolation \
+    'git+https://github.com/facebookresearch/sam2.git@2b90b9f'
+
+# 3. Detectron2 を git+ URL から手動でビルド。同じ理由で build isolation を切る。
 pip install --no-build-isolation \
     'git+https://github.com/facebookresearch/detectron2.git'
-
-# 3. SAM2 の C++ 拡張ビルドを確認（editable インストール時にビルドされていない場合は再実行）
-python -c "from sam2 import _C" 2>/dev/null || \
-    pip install -e ./vendor/sam2 --no-build-isolation --force-reinstall
 ```
 
 ### 検証
@@ -58,6 +59,12 @@ pip list | grep -Ei '^(torch|torchvision|torchaudio|nvidia-)'
 ### モデル重みのダウンロード
 
 ```bash
+# SAM2 (sam2.1_hiera_large)
+mkdir -p models/sam2
+curl -L -o models/sam2/sam2.1_hiera_large.pt \
+    https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
+
+# Casper（Wan2.1-Fun-1.3B ベース）
 hf download alibaba-pai/Wan2.1-Fun-1.3B-InP \
     --local-dir vendor/gen-omnimatte-public/models/Diffusion_Transformer/Wan2.1-Fun-1.3B-InP
 gdown "1n3Sv4d0pbTjfa5UhypEhTaylrSy2X4C1" \

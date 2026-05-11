@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 DetectorState = Literal["loading", "ready", "failed"]
 
 
-class DetectorHolder:
+class Detectron2:
     """Detectron2 の DefaultPredictor をプリロードして保持する。
 
-    SAM2 の `ModelHolder` と同パターン。`/health` で `detector_state` として状態を返す。
+    `/health` で `detector_state` として状態を返す。
     """
 
     def __init__(self) -> None:
@@ -119,4 +119,4 @@ class DetectorHolder:
         return result
 
 
-detector_holder = DetectorHolder()
+detectron2 = Detectron2()

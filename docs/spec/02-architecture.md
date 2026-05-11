@@ -40,7 +40,7 @@ flowchart LR
 
     subgraph SIDE["Casper Sidecar (FastAPI :8765)"]
         SideAPI[/run, /health/]
-        CHolder["CasperHolder<br/>(起動時プリロード)"]
+        CHolder["Casper<br/>(起動時プリロード)"]
         CPipe["Casper Pipeline<br/>(Wan2.1-Fun 1.3B)"]
         CHolder --> CPipe
         SideAPI --> CHolder
@@ -94,20 +94,20 @@ omnimatte-editor/
 ├── casper_server/                  # Casper sidecar（前景削除担当）
 │   ├── __init__.py                 # 空
 │   ├── main.py                     # FastAPI エントリ。lifespan で Casper ロード起動
-│   ├── holder.py                   # CasperHolder（loading/ready/failed の状態保持）
+│   ├── holder.py                   # Casper（loading/ready/failed の状態保持）
 │   ├── pipeline.py                 # gen-omnimatte-public のラッパ（load_pipeline / run_one_seq）
 │   └── routes/
 │       ├── __init__.py
 │       ├── health.py               # GET /health
 │       └── run.py                  # POST /run （multipart）
 ├── vendor/
-│   ├── sam2/                       # SAM2 公式リポジトリ（依存ライブラリとして配置）
-│   │   └── examples/
-│   │       └── segment_video_server.py
 │   └── gen-omnimatte-public/       # Casper（Wan2.1-1.3B）リポジトリ（git submodule）
+├── models/
+│   └── sam2/
+│       └── sam2.1_hiera_large.pt   # SAM2 チェックポイント（README の手順でダウンロード）
 ├── run.py                          # 本サーバ起動スクリプト（uvicorn）。lifespan で sidecar も自動 spawn
 ├── run_casper.py                   # sidecar 単独起動スクリプト（クラウド分離・デバッグ用）
-├── requirements.txt                # SAM2 (-e ./vendor/sam2) と Casper sidecar 依存を含む
+├── requirements.txt                # 共通依存。SAM2/Detectron2 は git+ URL から別途インストール
 └── frontend/
     ├── package.json
     ├── electron.vite.config.ts
@@ -143,9 +143,7 @@ omnimatte-editor/
     └── README.md                   # フロントエンドの起動手順
 ```
 
-`vendor/sam2/` は SAM2 公式リポジトリそのもの（依存ライブラリとして配置）。本プロジェクトのサーバ実装は `server/` に配置し、`vendor/sam2/examples/segment_video_server.py` をコピペするのではなく、参考にしながら本仕様に合わせて再実装する。
-
-`vendor/` 層を挟むのは、`sam2/` リポジトリが内部に同名 `sam2/sam2/` パッケージを持つため、`server/` などと同じ階層に置くと `import sam2` 時に namespace package として shadowing されるのを防ぐため。`vendor/sam2/` は sys.path 上のどのエントリ直下にも来ないので、editable install の finder 経由で正規パッケージが解決される。
+`vendor/gen-omnimatte-public/` は Casper モデル用にフォークしているリポジトリで、修正コードを抱えるため submodule で管理する。SAM2 と Detectron2 は upstream を修正していないので、git+ URL から直接 pip インストールする（README 参照）。
 
 ## 2.3 ビルド／起動の概要
 
@@ -153,13 +151,15 @@ omnimatte-editor/
 
 ```bash
 # 環境構築（初回のみ。project root で実行）
-pip install -r requirements.txt   # SAM2 (-e ./vendor/sam2) と Casper sidecar 用の依存を一括インストール
+pip install -r requirements.txt
+pip install --no-build-isolation 'git+https://github.com/facebookresearch/sam2.git@2b90b9f'
+pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
 
 # 起動（推奨・OS 非依存）
 python run.py
 ```
 
-`requirements.txt` の冒頭で `-e ./vendor/sam2` を指定しているため、SAM2 本体は editable インストールされる。`run.py` は本サーバを uvicorn 起動するスクリプトで、本サーバの lifespan が **Casper sidecar (`casper_server`) を自動 spawn する**。ユーザーは追加コマンド不要。
+`run.py` は本サーバを uvicorn 起動するスクリプトで、本サーバの lifespan が **Casper sidecar (`casper_server`) を自動 spawn する**。ユーザーは追加コマンド不要。
 
 uvicorn を直接使う場合は project root から `uvicorn server.main:app` でも可（同じく lifespan が sidecar を spawn する）。
 
@@ -225,7 +225,7 @@ sequenceDiagram
 | `server/casper_client.py` | sidecar への HTTP クライアント（`httpx`）。マスクを mp4 化して `POST /run` に送る | [03-backend.md](03-backend.md) |
 | `server/video_io.py` | mp4 デコード、base video＋マスクの半透明合成 mp4 エンコード、マスク → mp4 書き出し | [03-backend.md](03-backend.md) |
 | `casper_server/main.py` | Casper sidecar の FastAPI エントリ。lifespan で Casper プリロード | [03-backend.md](03-backend.md) |
-| `casper_server/holder.py` | Casper パイプラインのロード状態管理（SAM2 の `ModelHolder` と同パターン） | [03-backend.md](03-backend.md) |
+| `casper_server/holder.py` | Casper パイプラインのロード状態管理（SAM2 の `Sam2` クラスと同パターン） | [03-backend.md](03-backend.md) |
 | `casper_server/pipeline.py` | fork 済 `gen-omnimatte-public` の `predict_v2v.load_pipeline` を `importlib` で直接ロードして呼ぶ薄いラッパ。`run_one_seq` は本プロジェクト固有の出力フォーマット・前景のみ書き換え処理を含むため独自実装 | [03-backend.md](03-backend.md) |
 | `frontend/src/renderer/store/videoStore.ts` | zustandストア + VideoElement同期 | [08-state-management.md](08-state-management.md) |
 | `frontend/src/renderer/components/Canvas/VideoCanvas.ts` | Pixi 描画ロジック | [07-pixi-canvas.md](07-pixi-canvas.md) |
