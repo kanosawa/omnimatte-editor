@@ -226,7 +226,7 @@ sequenceDiagram
 | `server/video_io.py` | mp4 デコード、base video＋マスクの半透明合成 mp4 エンコード、マスク → mp4 書き出し | [03-backend.md](03-backend.md) |
 | `casper_server/main.py` | Casper sidecar の FastAPI エントリ。lifespan で Casper プリロード | [03-backend.md](03-backend.md) |
 | `casper_server/holder.py` | Casper パイプラインのロード状態管理（SAM2 の `ModelHolder` と同パターン） | [03-backend.md](03-backend.md) |
-| `casper_server/pipeline.py` | gen-omnimatte-public の `load_pipeline` / `run_inference` 相当を `absl` 非依存に再実装 | [03-backend.md](03-backend.md) |
+| `casper_server/pipeline.py` | fork 済 `gen-omnimatte-public` の `predict_v2v.load_pipeline` を `importlib` で直接ロードして呼ぶ薄いラッパ。`run_one_seq` は本プロジェクト固有の出力フォーマット・前景のみ書き換え処理を含むため独自実装 | [03-backend.md](03-backend.md) |
 | `frontend/src/renderer/store/videoStore.ts` | zustandストア + VideoElement同期 | [08-state-management.md](08-state-management.md) |
 | `frontend/src/renderer/components/Canvas/VideoCanvas.ts` | Pixi 描画ロジック | [07-pixi-canvas.md](07-pixi-canvas.md) |
 | `frontend/src/renderer/components/Canvas/CanvasView.tsx` | Pixi クラスを React コンポーネントとしてラップ | [07-pixi-canvas.md](07-pixi-canvas.md) |

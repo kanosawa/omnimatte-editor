@@ -92,7 +92,7 @@
 | 前景削除の入力 | マスク重畳済み合成 mp4 ではなく、base video | マスクの色付けが推論ノイズになるのを避ける（F10） |
 | 前景削除のカスケード | `/remove` 完了でセッションのベース動画自体を差し替える | 「2回目以降の前景削除は前回の結果に対して行う」要件 F13 を最小実装で満たす |
 | マスクの保持位置 | フロントではなくサーバ（`MaskStore`） | マスクは大きく、JSON 化や HTTP 往復が無駄。`/remove` でも HTTP body にマスクを載せず空 POST で済む |
-| Casper の起動方式 | 永続 sidecar プロセス（事前ロード）。本サーバとは別プロセスの FastAPI（`127.0.0.1:8765`）を lifespan で自動 spawn し、Casper をプリロード。本サーバから HTTP で呼ぶ | 事前ロードで `/remove` 応答は推論時間のみに短縮。プロセス分離で `absl` / `hydra` のグローバル状態汚染、`videox_fun` の名前空間衝突、`gradio` 等の重依存混入、CUDA C 拡張 ABI 衝突といった依存衝突リスクを回避 |
+| Casper の起動方式 | 永続 sidecar プロセス（事前ロード）。本サーバとは別プロセスの FastAPI（`127.0.0.1:8765`）を lifespan で自動 spawn し、Casper をプリロード。本サーバから HTTP で呼ぶ | 事前ロードで `/remove` 応答は推論時間のみに短縮。プロセス分離で `videox_fun` の名前空間衝突、`gradio` 等の重依存混入、CUDA C 拡張 ABI 衝突といった依存衝突リスクを回避。クラウド GPU 機に sidecar だけを分離する運用 (`OMNIMATTE_SPAWN_CASPER=0` + `CASPER_SIDECAR_BASE`) にもそのまま乗る（`absl.flags` のモジュールトップ汚染は fork 版 `vendor/gen-omnimatte-public` で `if __name__ == "__main__"` ブロックに閉じ込めて解消済み） |
 
 ## 1.7 実装チェックリスト
 
