@@ -5,10 +5,10 @@ import tempfile
 
 from fastapi import APIRouter, HTTPException, Response
 
-from server.casper_client import (
+from server.casper import (
     CasperBusyError,
+    CasperNotReadyError,
     CasperRunError,
-    CasperUnreachableError,
     run_casper,
 )
 from server.full_foreground_store import full_foreground_store
@@ -54,7 +54,7 @@ async def remove_foreground() -> Response:
             width=session.width,
             height=session.height,
         )
-    except CasperUnreachableError as exc:
+    except CasperNotReadyError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except CasperBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
