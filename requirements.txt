@@ -10,9 +10,6 @@ decord
 huggingface_hub
 gdown
 
-# 本サーバ ⇔ Casper sidecar HTTP
-httpx
-
 # 物体検出（COCO Mask R-CNN）。pip での直接インストールは git+ URL 経由。
 # Detectron2 の setup.py は import 時に torch を要求するため、build isolation を切る必要がある
 # （torch は本 requirements.txt の他依存で既に入っている前提）:

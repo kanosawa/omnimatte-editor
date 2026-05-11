@@ -4,7 +4,7 @@ import logging
 import numpy as np
 from fastapi import APIRouter, HTTPException, Response
 
-from server.casper_client import preload_casper
+from server.casper import preload_casper
 from server.full_foreground_store import full_foreground_store
 from server.mask_store import mask_store
 from server.model import DETECTRON2_IOU_WITH_TARGET
@@ -157,8 +157,8 @@ async def segment(req: SegmentRequest) -> Response:
         fps=fps,
     )
 
-    # 先回り Casper 推論を sidecar にバックグラウンドで依頼。
-    # ユーザーが結果を眺めて「前景削除」ボタンを押すまでに sidecar が
+    # 先回り Casper 推論をバックグラウンドで起動（fire-and-forget）。
+    # ユーザーが結果を眺めて「前景削除」ボタンを押すまでに本サーバ内で
     # 計算を済ませてキャッシュするので、/remove は cache hit で即返ることが期待される。
     asyncio.create_task(
         preload_casper(
