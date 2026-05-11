@@ -2,8 +2,7 @@
 
 バックエンドの /segment 結果と直接比較するための切り分け用。
 モデル差を排除するため、バックエンドと**同じ checkpoint・config**
-（`server.model.SAM2_CFG` / `SAM2_CKPT`）を使う。呼び出し手順は
-`sam/scripts/compare_sam2_sam3_video.py` の SAM2 パスを踏襲：
+（`server.model.SAM2_CFG` / `SAM2_CKPT`）を使う。呼び出し手順:
 
   - cv2.VideoCapture でフレーム抽出 → JPEG (q=95) 保存
   - predictor.init_state(jpeg_dir)

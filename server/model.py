@@ -13,16 +13,6 @@ SAM2_CFG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 SAM2_CKPT = os.path.join(_sam2_dir, "checkpoints/sam2.1_hiera_large.pt")
 SAM2_DEVICE = "cuda"
 
-# ---------- SAM3 ----------
-_sam3_dir = os.path.join(_project_root, "vendor", "sam3")
-# Hugging Face mirror (AEmotionStudio/sam3) からダウンロードした safetensors。
-# OMNIMATTE_SAM3_CKPT で上書き可
-SAM3_CKPT = os.environ.get(
-    "OMNIMATTE_SAM3_CKPT",
-    os.path.join(_sam3_dir, "checkpoints", "sam3.safetensors"),
-)
-SAM3_DEVICE = "cuda"
-
 # ---------- Casper（gen-omnimatte-public, Wan2.1-Fun-1.3B-InP）----------
 CASPER_REPO_DIR = os.path.join(_project_root, "vendor", "gen-omnimatte-public")
 CASPER_TRANSFORMER_PATH = os.path.join(

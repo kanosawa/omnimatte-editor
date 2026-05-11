@@ -1,46 +1,68 @@
 # omnimatte-editor
 
-## SAM backend の選択
+## 環境構築（初回のみ）
 
-`OMNIMATTE_SAM_VERSION` 環境変数で SAM2 / SAM3 を切替できる（既定: `2` = SAM2）。
+### システム要件
 
-| 値 | backend | 必要環境 |
-|---|---|---|
-| `2` | SAM2 (`vendor/sam2`) | Python 3.10+, PyTorch 2.x |
-| `3` | SAM3 (`vendor/sam3`) | **Python 3.12+, PyTorch 2.7+, CUDA 12.6+** |
+- Python 3.10+
+- CUDA 対応 GPU + NVIDIA ドライバ
+- **`ffmpeg` バイナリ**がシステム PATH に通っていること（`mediapy` が subprocess で呼ぶ）
+  - Linux: `sudo apt install -y ffmpeg`
+  - macOS: `brew install ffmpeg`
+  - Windows: `winget install ffmpeg`
 
-### SAM3 セットアップ（初回のみ）
+### 依存パッケージのインストール
+
+**順序が重要**: 先に `requirements.txt`（冒頭で torch を CUDA 12.4 wheel に固定済み）→ 続いて Detectron2 をビルド、という順で入れる。これを逆順にすると、Detectron2 が古い torch を持ち込んだ後に他依存が「より新しい torch」を要求してアップグレードチェーンが走り、**CUDA 12 系と 13 系の nvidia-* ライブラリが混在してパフォーマンスが激しく劣化**する（cuDNN/cuBLAS の不整合で SDPA が math fallback に落ち、Casper の 1 diffusion step が秒単位で遅くなる）。
 
 ```bash
-# 1. Python 3.12+ の venv を別途用意（既存 venv は SAM3 非互換）
-python3.12 -m venv .venv-sam3
-source .venv-sam3/bin/activate   # Windows: .venv-sam3\Scripts\activate
+# 0. (推奨) 既存の torch / nvidia-* 系を一度クリーンにする
+pip uninstall -y torch torchvision torchaudio \
+    $(pip list 2>/dev/null | awk '/^nvidia-/ {print $1}')
 
-# 2. 共通依存をインストール
+# 1. 共通依存をインストール（torch 2.5.1+cu124 が requirements.txt 冒頭で
+#    --extra-index-url 経由に固定されているので、ここで全部解決される）
+pip install --upgrade pip setuptools wheel ninja
 pip install -r requirements.txt
 
-# 3. vendor/sam3 のクローン + pip install + 重み（sam3.safetensors）DL
-python scripts/setup_sam3.py
+# 2. Detectron2 を git+ URL から手動でビルド。
+#    setup.py が import 時に torch を要求するため build isolation を切る。
+pip install --no-build-isolation \
+    'git+https://github.com/facebookresearch/detectron2.git'
+
+# 3. SAM2 の C++ 拡張ビルドを確認（editable インストール時にビルドされていない場合は再実行）
+python -c "from sam2 import _C" 2>/dev/null || \
+    pip install -e ./vendor/sam2 --no-build-isolation --force-reinstall
 ```
 
-`scripts/setup_sam3.py` は以下を行う:
-1. `git submodule update --init vendor/sam3`
-2. `pip install -e vendor/sam3`
-3. [AEmotionStudio/sam3](https://huggingface.co/AEmotionStudio/sam3)（HF, non-gated mirror）から `sam3.safetensors` を `vendor/sam3/checkpoints/` に取得
-
-オプション: `--no-install`（pip install スキップ）、`--skip-weights`（重み DL スキップ）。
-
-### 起動例
+### 検証
 
 ```bash
-# SAM2（既定）
-python run.py
-
-# SAM3（環境構築済み前提）
-OMNIMATTE_SAM_VERSION=3 python run.py
+python -c "
+import torch
+print('torch    :', torch.__version__)
+print('cuda     :', torch.version.cuda)
+print('cudnn    :', torch.backends.cudnn.version())
+print('device   :', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no cuda')
+from sam2 import _C  # noqa
+print('sam2._C  : OK')
+"
+pip list | grep -Ei '^(torch|torchvision|torchaudio|nvidia-)'
 ```
 
-`/health` レスポンスの `samVersion` フィールドで現在の選択を確認できる。
+期待する状態:
+- `torch 2.5.1+cu124` / `torchvision 0.20.1+cu124` / `torchaudio 2.5.1+cu124`
+- `nvidia-*-cu12` のみ（`-cu13` 系が混在していないこと）
+- `from sam2 import _C` が例外なしで通る
+
+### モデル重みのダウンロード
+
+```bash
+hf download alibaba-pai/Wan2.1-Fun-1.3B-InP \
+    --local-dir vendor/gen-omnimatte-public/models/Diffusion_Transformer/Wan2.1-Fun-1.3B-InP
+gdown "1n3Sv4d0pbTjfa5UhypEhTaylrSy2X4C1" \
+    -O vendor/gen-omnimatte-public/models/Casper/wan2.1_fun_1.3b_casper.safetensors
+```
 
 ## サーバ起動
 

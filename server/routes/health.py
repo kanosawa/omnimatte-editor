@@ -15,7 +15,6 @@ router = APIRouter()
 async def health() -> HealthResponse:
     return HealthResponse(
         model_state=sam_backend.state,
-        sam_version=sam_backend.version,
         casper_state=get_casper_state(),
         detector_state=detector_holder.state,
         full_fg_state=full_foreground_store.state,

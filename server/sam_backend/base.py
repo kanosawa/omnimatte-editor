@@ -1,8 +1,8 @@
-"""SAM backend abstraction (SAM2 / SAM3 共通インターフェース).
+"""SAM backend abstraction.
 
 `server.routes.*` および `server.full_foreground_store` などの呼び出し側は
-このインターフェースのみを介して SAM を扱う。バージョン依存のロード処理・
-座標系変換・autocast などは各 backend 実装内に閉じ込める。
+このインターフェースのみを介して SAM を扱う。SAM2 のロード処理・autocast などは
+`sam2_backend.py` に閉じ込める。
 """
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import numpy as np
 
 
 ModelState = Literal["loading", "ready", "failed"]
-SamVersionTag = Literal["sam2", "sam3"]
 
 
 PropagateItem = tuple[int, list[int], list[np.ndarray]]
@@ -26,7 +25,7 @@ PropagateItem = tuple[int, list[int], list[np.ndarray]]
 
 
 class SamBackend(ABC):
-    """SAM2 / SAM3 を統一的に扱うための backend ABC."""
+    """SAM2 video predictor を扱うための backend ABC."""
 
     # ---------- ロード状態 ----------
 
@@ -37,10 +36,6 @@ class SamBackend(ABC):
     @property
     @abstractmethod
     def error(self) -> str | None: ...
-
-    @property
-    @abstractmethod
-    def version(self) -> SamVersionTag: ...
 
     @abstractmethod
     async def load(self) -> None:
@@ -86,11 +81,10 @@ class SamBackend(ABC):
         """bbox プロンプトを登録し、初期フレームの bool[H, W] マスクを返す。
 
         - bbox: `[x1, y1, x2, y2]` の動画ピクセル座標
-        - base_video_path: 一部 backend が frame を読むのに使う（現状の SAM2/SAM3 では未使用）
+        - base_video_path: 一部 backend が frame を読むのに使う（現状の SAM2 では未使用）
         - height/width: 出力マスク解像度（base video の解像度）
 
-        SAM2 backend / SAM3 backend ともに video predictor の `add_new_points_or_box`
-        に bbox を直接渡す。SAM3 は normalized [0, 1] への変換のみ行う。
+        video predictor の `add_new_points_or_box` に bbox を直接渡す。
         """
 
     # ---------- 伝播 ----------
@@ -103,8 +97,4 @@ class SamBackend(ABC):
         num_frames: int,
         reverse: bool = False,
     ) -> Iterator[PropagateItem]:
-        """`start_frame_idx` から順方向 / 逆方向に伝播し、各フレームのマスクを yield する。
-
-        num_frames は SAM3 が `max_frame_num_to_track` を要求するため必須引数。
-        SAM2 backend では無視される。
-        """
+        """`start_frame_idx` から順方向 / 逆方向に伝播し、各フレームのマスクを yield する。"""

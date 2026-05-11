@@ -40,10 +40,6 @@ class Sam2Backend(SamBackend):
     def error(self) -> str | None:
         return self._error
 
-    @property
-    def version(self):
-        return "sam2"
-
     def _load_sync(self):
         from sam2.build_sam import build_sam2_video_predictor
 

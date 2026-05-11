@@ -2,7 +2,7 @@
 
 ## 3.1 概要
 
-FastAPI で構築する HTTP サーバ。**本サーバ（SAM2 担当, `:8000`）** と **Casper Sidecar（前景削除担当, `:8765`）** の 2 プロセス構成で、両方とも起動時にモデルをプリロードする。
+FastAPI で構築する HTTP サーバ。**本サーバ（SAM2 担当, `:8000`）** と **Casper Sidecar（前景削除担当, `:8765`）** の 2 プロセス構成で、両方とも起動時にモデルをプリロードする。SAM は SAM2 を決め打ちで使用する。
 
 本サーバは、フロントエンドからの mp4 アップロードと BBox 付き推論リクエストを受け付ける。`/segment` のレスポンスは **base video にマスクを半透明＋着色合成した mp4 バイナリ**（マスク単体ではなく合成済み）。
 
@@ -64,8 +64,6 @@ casper_server/             # Casper sidecar
 | `SAM2_CFG` | `configs/sam2.1/sam2.1_hiera_l.yaml` | SAM2 設定ファイル（hydra で解決） |
 | `SAM2_CKPT` | `<project_root>/vendor/sam2/checkpoints/sam2.1_hiera_large.pt` | チェックポイントの絶対パス（`__file__` 起点で解決） |
 | `SAM2_DEVICE` | `cuda` | SAM2 推論デバイス |
-| `SAM3_CKPT` | `<project_root>/vendor/sam3/checkpoints/sam3.safetensors`（環境変数 `OMNIMATTE_SAM3_CKPT` で上書き可） | SAM3 重みファイル。AEmotionStudio/sam3 (HF, non-gated) から `scripts/setup_sam3.py` で取得 |
-| `SAM3_DEVICE` | `cuda` | SAM3 推論デバイス |
 | `DETECTRON2_CONFIG` | `COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml` | COCO Mask R-CNN の config（model_zoo 指定） |
 | `DETECTRON2_DEVICE` | `cuda` | 検出推論デバイス |
 | `DETECTRON2_SCORE_THRESH` | `0.5` | 検出スコアのしきい値（COCO 既定） |
@@ -93,8 +91,6 @@ sidecar との通信は環境変数で制御する。
 
 | 環境変数 | 既定値 | 用途 |
 |---|---|---|
-| `OMNIMATTE_SAM_VERSION` | `2` | SAM backend 選択。`2` = SAM2 (`vendor/sam2`)、`3` = SAM3 (`vendor/sam3`) |
-| `OMNIMATTE_SAM3_CKPT` | `<project_root>/vendor/sam3/checkpoints/sam3.safetensors` | SAM3 重みファイルパス上書き |
 | `OMNIMATTE_CASPER_PORT` | `8765` | sidecar のリッスンポート |
 | `CASPER_SIDECAR_BASE` | `http://127.0.0.1:{OMNIMATTE_CASPER_PORT}` | 本サーバ → sidecar の HTTP ベース URL |
 | `OMNIMATTE_SPAWN_CASPER` | `1` | `0` のとき本サーバ lifespan で sidecar を spawn しない（クラウド分離・デバッグ用） |
@@ -111,18 +107,17 @@ sidecar との通信は環境変数で制御する。
 
 ## 3.4 モデルロード（`sam_backend/`）
 
-### 3.4.1 SAM backend 抽象化
+### 3.4.1 SAM backend
 
-SAM2 / SAM3 の両モデルを統一インターフェースで扱うため、[`server/sam_backend/`](../../server/sam_backend/) パッケージに以下を配置する。
+[`server/sam_backend/`](../../server/sam_backend/) パッケージに以下を配置する。
 
 | ファイル | 役割 |
 |---|---|
-| `base.py` | `SamBackend` ABC。`state` / `version` / `wait_ready` / `init_state` / `reset_state` / `add_mask` / `add_bbox_prompt` / `propagate` を定義 |
+| `base.py` | `SamBackend` ABC。`state` / `wait_ready` / `init_state` / `reset_state` / `add_mask` / `add_bbox_prompt` / `propagate` を定義 |
 | `sam2_backend.py` | SAM2 実装。`Sam2VideoPredictor` をラップし、`add_bbox_prompt` で `add_new_points_or_box` に bbox を直接渡す |
-| `sam3_backend.py` | SAM3 実装。`build_sam3_video_model().tracker` をラップ。`add_bbox_prompt` は `add_new_points_or_box` に bbox（normalized [0,1] に変換）を直接渡す |
-| `__init__.py` | `OMNIMATTE_SAM_VERSION` env var (`"2"` / `"3"`、既定 `"2"`) を見て backend インスタンス `sam_backend` を構築・export |
+| `__init__.py` | `Sam2Backend` インスタンス `sam_backend` を構築・export |
 
-呼び出し側（`server/routes/*`、`server/full_foreground_store.py`）は `sam_backend` のみを介して SAM を扱い、バージョン依存ロジック（座標系・autocast・5-tuple vs 3-tuple の戻り値差・`max_frame_num_to_track` の必須性など）はすべて backend 内に閉じ込められる。
+呼び出し側（`server/routes/*`、`server/full_foreground_store.py`）は `sam_backend` のみを介して SAM を扱い、autocast 等の詳細は backend 内に閉じ込められる。
 
 ### 3.4.2 ロードのライフサイクル
 
@@ -137,11 +132,10 @@ stateDiagram-v2
 
 ### 3.4.3 状態保持
 
-各 backend は以下を保持する。
+backend は以下を保持する。
 
 - `state`: `"loading" | "ready" | "failed"`
-- `version`: `"sam2" | "sam3"`（`/health` で返す）
-- `_predictor`: ラップ対象の predictor（SAM2 は `Sam2VideoPredictor`、SAM3 は tracker）
+- `_predictor`: ラップ対象の `Sam2VideoPredictor`
 - `error`: ロード失敗時のエラーメッセージ
 - `_ready_event`: `asyncio.Event`（ロード完了シグナル）
 
@@ -184,7 +178,7 @@ async def wait_ready(self, timeout: float | None = None) -> None:
 
 ハンドラ側では `TimeoutError` / `RuntimeError` を 503 に変換。タイムアウトはハードコードで 5.0 秒（[04-api.md §4.7](04-api.md#47-タイムアウト方針)）。
 
-`/health` はこの待ち合わせを行わず、現在の `state` と `version` をそのまま返す。
+`/health` はこの待ち合わせを行わず、現在の `state` をそのまま返す。
 
 ## 3.5 セッション管理（`session.py`）
 
@@ -359,9 +353,7 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 3. `frame_idx` の範囲チェック（無効なら 422）
 4. **`full_foreground_store.wait_ready(timeout=600.0)` で全前景抽出の完了を待機**（バックグラウンドで進行中の場合あり）
 5. `sam_backend.reset_state(state)` で前回結果をクリア
-6. **backend に bbox プロンプトを登録**（`sam_backend.add_bbox_prompt`）:
-   - **SAM2 backend** は video predictor の `add_new_points_or_box(..., box=bbox)` に bbox（pixel xyxy）を直接渡す。SAM2 ネイティブの box prompt embedding が memory bank に正規格納され、propagation の memory attention が想定通りに働く
-   - **SAM3 backend** は `add_new_points_or_box(..., box=rel_box)` に bbox（normalized [0,1] に変換）を直接渡す
+6. **backend に bbox プロンプトを登録**（`sam_backend.add_bbox_prompt`）: video predictor の `add_new_points_or_box(..., box=bbox)` に bbox（pixel xyxy）を直接渡す。SAM2 ネイティブの box prompt embedding が memory bank に正規格納され、propagation の memory attention が想定通りに働く
 7. 順方向と逆方向の `propagate_in_video` を実行し、フレーム別マスク `masks_target (T,H,W) bool` を取得
 8. **R-CNN 検出物体から対象を除外**: 各 R-CNN 物体について `IoU(target_at_frame_idx, obj_at_frame_idx) > DETECTRON2_IOU_WITH_TARGET` ならスキップ。残りを OR して `other_fg_combined (T,H,W) bool`
 9. **trimask 構築** (`(T, H, W) uint8`、Casper の trimask 規約に合わせた値):
