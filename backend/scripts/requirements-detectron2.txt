@@ -1,7 +1,0 @@
-# detectron2 専用。`pip install --no-build-isolation --no-deps -r requirements-detectron2.txt` で入れる。
-# 理由: detectron2 の install_requires は `iopath>=0.1.7,<0.1.10` を要求するが、
-# 同居する sam-2 が `iopath>=0.1.10` を要求するため resolver が conflict する。
-# iopath 0.1.10 は detectron2 でも runtime で問題なく動作するので、--no-deps で
-# detectron2 の dep 解決をスキップし、必要な deps は backend/scripts/requirements.txt に
-# 明示的に並べる方針を取る。
-detectron2 @ git+https://github.com/facebookresearch/detectron2.git@b599f139756bd3646a26a909caf86a1a159e53a7
