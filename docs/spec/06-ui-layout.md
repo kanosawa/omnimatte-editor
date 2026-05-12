@@ -53,7 +53,7 @@ flowchart TB
 ### 6.2.3 Sam2Button
 
 - 表示: 「SAM2 で検出」 or アイコン + テキスト
-- 活性条件: BBox が有効、かつ SAM2 推論中でない、**かつ前景削除中でない**、かつ動画ロード済み、かつバックエンドの `model_state === "ready"`
+- 活性条件: BBox が有効、かつ SAM2 推論中でない、**かつ前景削除中でない**、かつ動画ロード済み、かつバックエンドの `sam_state === "ready"`
 - それ以外はグレーアウト（disabled）
 - 動作: クリックで `videoStore.runSegment()` を呼ぶ
 - 推論中の表示: スピナー or ボタンラベルを「処理中…」に変更（[09-state-transitions.md](09-state-transitions.md) 参照）

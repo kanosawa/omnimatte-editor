@@ -28,9 +28,9 @@
 ```json
 {
   "status": "ok",
-  "model_state": "loading",
-  "casper_state": "loading",
   "detector_state": "loading",
+  "sam_state": "loading",
+  "casper_state": "loading",
   "full_fg_state": "empty",
   "session_active": false
 }
@@ -39,9 +39,9 @@
 | フィールド | 型 | 説明 |
 |---|---|---|
 | `status` | string | `"ok"` 固定 |
-| `model_state` | string | SAM2 backend のロード状態。`"loading"` / `"ready"` / `"failed"` |
-| `casper_state` | string | Casper sidecar のロード状態。`"loading"` / `"ready"` / `"failed"` / `"unreachable"`（sidecar に接続できない） |
 | `detector_state` | string | Detectron2 (COCO Mask R-CNN) のロード状態。`"loading"` / `"ready"` / `"failed"` |
+| `sam_state` | string | SAM2 backend のロード状態。`"loading"` / `"ready"` / `"failed"` |
+| `casper_state` | string | Casper sidecar のロード状態。`"loading"` / `"ready"` / `"failed"` / `"unreachable"`（sidecar に接続できない） |
 | `full_fg_state` | string | 全前景抽出（R-CNN + SAM propagation）の状態。`"empty"`（未開始）/ `"loading"`（バックグラウンド実行中）/ `"ready"` / `"failed"` |
 | `session_active` | boolean | 現在セッションが存在するか（バックエンドは常に最大1件） |
 

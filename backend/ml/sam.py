@@ -24,7 +24,7 @@ from backend.config import SAM2_CFG, SAM2_CKPT, SAM2_DEVICE
 logger = logging.getLogger(__name__)
 
 
-ModelState = Literal["loading", "ready", "failed"]
+SamState = Literal["loading", "ready", "failed"]
 
 
 PropagateItem = tuple[int, list[int], list[np.ndarray]]
@@ -38,13 +38,13 @@ PropagateItem = tuple[int, list[int], list[np.ndarray]]
 
 class Sam2:
     def __init__(self) -> None:
-        self._state: ModelState = "loading"
+        self._state: SamState = "loading"
         self._predictor = None
         self._error: str | None = None
         self._ready_event = asyncio.Event()
 
     @property
-    def state(self) -> ModelState:
+    def state(self) -> SamState:
         return self._state
 
     @property

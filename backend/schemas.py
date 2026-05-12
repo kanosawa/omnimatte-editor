@@ -3,9 +3,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
 
-ModelStateLiteral = Literal["loading", "ready", "failed"]
-CasperStateLiteral = Literal["loading", "ready", "failed", "unreachable"]
 DetectorStateLiteral = Literal["loading", "ready", "failed"]
+SamStateLiteral = Literal["loading", "ready", "failed"]
+CasperStateLiteral = Literal["loading", "ready", "failed", "unreachable"]
 FullFgStateLiteral = Literal["empty", "loading", "ready", "failed"]
 
 
@@ -17,7 +17,7 @@ class _CamelModel(BaseModel):
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     detector_state: DetectorStateLiteral
-    model_state: ModelStateLiteral
+    sam_state: SamStateLiteral
     casper_state: CasperStateLiteral
     full_fg_state: FullFgStateLiteral
     session_active: bool

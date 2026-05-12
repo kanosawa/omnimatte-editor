@@ -70,7 +70,7 @@ type VideoStoreState = {
 };
 ```
 
-`/health` のポーリングおよび `modelState` の保持はフロントでは行わない（`/session` 呼び出し時にバックエンド側で `wait_ready(5.0)` がブロックするため。[03-backend.md §3.4.4](03-backend.md#344-リクエスト処理時のロード待ち合わせ)）。
+`/health` のポーリングおよび `samState` の保持はフロントでは行わない（`/session` 呼び出し時にバックエンド側で `wait_ready(5.0)` がブロックするため。[03-backend.md §3.4.4](03-backend.md#344-リクエスト処理時のロード待ち合わせ)）。
 
 ## 8.4 アクション
 
