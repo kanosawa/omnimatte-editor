@@ -45,9 +45,8 @@ app.include_router(removal.router)
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
 
-    uvicorn.run(
-        "backend.main:app",
-        port=8000,
-    )
+    port = int(os.environ.get("OMNIMATTE_PORT", "8000"))
+    uvicorn.run(app, host="127.0.0.1", port=port)
