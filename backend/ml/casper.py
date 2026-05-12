@@ -23,13 +23,13 @@ from typing import Any, Literal
 
 import numpy as np
 
-from backend.casper_pipeline import build_default_config, load_pipeline, run_one_seq
-from backend.model import (
+from backend.config import (
     CASPER_DEFAULT_PROMPT,
     CASPER_STARTUP_TIMEOUT_SEC,
     CASPER_TRANSFORMER_PATH,
 )
-from backend.video_io import write_trimask_mp4
+from backend.media.video_io import write_trimask_mp4
+from backend.ml.casper_pipeline import build_default_config, load_pipeline, run_one_seq
 
 
 logger = logging.getLogger(__name__)

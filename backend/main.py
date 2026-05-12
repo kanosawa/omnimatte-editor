@@ -15,10 +15,10 @@ import torchvision.ops  # noqa: F401
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.casper import casper
-from backend.detector import detectron2
+from backend.ml.casper import casper
+from backend.ml.detector import detectron2
+from backend.ml.sam import sam2
 from backend.routes import health, removal, segment, session
-from backend.sam import sam2
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")

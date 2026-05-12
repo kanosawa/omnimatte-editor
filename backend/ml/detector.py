@@ -9,7 +9,7 @@ from typing import Literal
 
 import numpy as np
 
-from backend.model import (
+from backend.config import (
     DETECTRON2_CONFIG,
     DETECTRON2_DEVICE,
     DETECTRON2_MAX_DETECTIONS,

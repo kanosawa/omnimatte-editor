@@ -18,7 +18,7 @@ from typing import Any, Iterator, Literal
 import numpy as np
 import torch
 
-from backend.model import SAM2_CFG, SAM2_CKPT, SAM2_DEVICE
+from backend.config import SAM2_CFG, SAM2_CKPT, SAM2_DEVICE
 
 
 logger = logging.getLogger(__name__)

@@ -4,14 +4,14 @@ import logging
 import numpy as np
 from fastapi import APIRouter, HTTPException, Response
 
-from backend.casper import preload_casper
-from backend.full_foreground_store import full_foreground_store
-from backend.mask_store import mask_store
-from backend.model import DETECTRON2_IOU_WITH_TARGET
-from backend.sam import sam2
+from backend.config import DETECTRON2_IOU_WITH_TARGET
+from backend.media.video_io import composite_overlay_to_mp4
+from backend.ml.casper import preload_casper
+from backend.ml.sam import sam2
 from backend.schemas import SegmentRequest
-from backend.session import session_slot
-from backend.video_io import composite_overlay_to_mp4
+from backend.stores.full_foreground_store import full_foreground_store
+from backend.stores.mask_store import mask_store
+from backend.stores.session import session_slot
 
 
 router = APIRouter()

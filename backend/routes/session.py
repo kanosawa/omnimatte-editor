@@ -7,13 +7,13 @@ import tempfile
 import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from backend.detector import detectron2
-from backend.full_foreground_store import full_foreground_store
-from backend.mask_store import mask_store
-from backend.sam import sam2
+from backend.media.video_io import probe_video, read_frame_at
+from backend.ml.detector import detectron2
+from backend.ml.sam import sam2
 from backend.schemas import StartSessionResponse, VideoMeta
-from backend.session import Session, session_slot
-from backend.video_io import probe_video, read_frame_at
+from backend.stores.full_foreground_store import full_foreground_store
+from backend.stores.mask_store import mask_store
+from backend.stores.session import Session, session_slot
 
 
 router = APIRouter()

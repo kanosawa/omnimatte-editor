@@ -5,17 +5,17 @@ import tempfile
 
 from fastapi import APIRouter, HTTPException, Response
 
-from backend.casper import (
+from backend.media.video_io import probe_video
+from backend.ml.casper import (
     CasperBusyError,
     CasperNotReadyError,
     CasperRunError,
     run_casper,
 )
-from backend.full_foreground_store import full_foreground_store
-from backend.mask_store import mask_store
-from backend.sam import sam2
-from backend.session import session_slot
-from backend.video_io import probe_video
+from backend.ml.sam import sam2
+from backend.stores.full_foreground_store import full_foreground_store
+from backend.stores.mask_store import mask_store
+from backend.stores.session import session_slot
 
 
 router = APIRouter()
