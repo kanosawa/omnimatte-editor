@@ -38,11 +38,13 @@ pip install --upgrade pip setuptools wheel ninja
 pip install torch~=2.5.0 torchvision~=0.20.0 torchaudio~=2.5.0 \
     --index-url https://download.pytorch.org/whl/cu124
 
-# 3. 残りの依存を install する。
-#    SAM2 / Detectron2 はコミット pin 済みで requirements.txt 内に含まれており、
-#    両者の setup.py は import 時に outer env の torch を要求するため
-#    --no-build-isolation が必須（手順 2 で入れた torch を借用してビルドする）。
-pip install --no-build-isolation -r backend/requirements.txt
+# 3. 残りの依存（sam-2 + detectron2）+ AI モデル重みを一括セットアップする。
+#    setup.sh 内で 3 段に分かれている:
+#      - requirements.txt の install
+#      - detectron2 の --no-deps install (iopath 制約衝突を回避するため)
+#      - SAM2 / Casper の重みダウンロード (wget / hf / gdown を直接呼ぶ)
+#    Ubuntu 想定。
+bash backend/scripts/setup.sh
 ```
 
 ### 検証
@@ -65,21 +67,15 @@ pip list | grep -Ei '^(torch|torchvision|torchaudio|nvidia-)'
 - `nvidia-*` ライブラリの CUDA メジャーが混在していない（`-cu12` 系で揃う、など）
 - `from sam2 import _C` が例外なしで通る
 
-### モデル重みのダウンロード
+### モデル重みのダウンロード先
 
-SAM2 / Casper の重みを一括ダウンロードする:
+`setup.sh` がまとめてダウンロードするので通常は気にしなくてよいが、参考として:
 
-```bash
-cd backend
-python scripts/download_models.py
-```
-
-ダウンロード先:
 - SAM2: `backend/models/sam2/sam2.1_hiera_large.pt`
 - Casper Diffusion Transformer: `backend/vendor/gen-omnimatte-public/models/Diffusion_Transformer/Wan2.1-Fun-1.3B-InP/`
 - Casper safetensors: `backend/vendor/gen-omnimatte-public/models/Casper/wan2.1_fun_1.3b_casper.safetensors`
 
-既に存在するファイルはスキップするので、途中で失敗しても再実行で続きから取得できる。
+既に存在するファイルはスキップするので、途中で失敗しても `bash backend/scripts/setup.sh` を再実行すれば続きから取得できる。
 
 ## サーバ起動
 

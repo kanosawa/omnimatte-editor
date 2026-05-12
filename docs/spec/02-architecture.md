@@ -150,7 +150,7 @@ omnimatte-editor/
 
 ```bash
 # 環境構築（初回のみ。project root で実行）
-pip install -r backend/requirements.txt
+pip install -r backend/scripts/requirements.txt
 pip install --no-build-isolation 'git+https://github.com/facebookresearch/sam2.git@2b90b9f'
 pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
 
