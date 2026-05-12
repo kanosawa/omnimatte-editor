@@ -5,21 +5,20 @@ import os
 logger = logging.getLogger(__name__)
 
 _here = os.path.dirname(os.path.abspath(__file__))
-_project_root = os.path.dirname(_here)
 
 # ---------- SAM2 ----------
 SAM2_CFG = "configs/sam2.1/sam2.1_hiera_l.yaml"
-SAM2_CKPT = os.path.join(_project_root, "models", "sam2", "sam2.1_hiera_large.pt")
+SAM2_CKPT = os.path.join(_here, "models", "sam2", "sam2.1_hiera_large.pt")
 SAM2_DEVICE = "cuda"
 
 # ---------- Casper（gen-omnimatte-public, Wan2.1-Fun-1.3B-InP）----------
-CASPER_REPO_DIR = os.path.join(_project_root, "vendor", "gen-omnimatte-public")
+CASPER_REPO_DIR = os.path.join(_here, "vendor", "gen-omnimatte-public")
 CASPER_TRANSFORMER_PATH = os.path.join(
     CASPER_REPO_DIR, "models", "Casper", "wan2.1_fun_1.3b_casper.safetensors"
 )
 CASPER_CONFIG_PATH = "config/default_wan.py"  # CASPER_REPO_DIR からの相対
 # 推論解像度は固定値ではなく、リクエストごとに base video の解像度から動的に決定する
-# （server.casper 側で 16 の倍数に丸める）
+# （backend.casper 側で 16 の倍数に丸める）
 CASPER_FPS = 8
 CASPER_NUM_INFERENCE_STEPS = 1
 CASPER_TEMPORAL_WINDOW_SIZE = 21

@@ -23,7 +23,7 @@ pip uninstall -y torch torchvision torchaudio \
 # 1. 共通依存をインストール（torch 2.5.1+cu124 が requirements.txt 冒頭で
 #    --extra-index-url 経由に固定されているので、ここで全部解決される）
 pip install --upgrade pip setuptools wheel ninja
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 
 # 2. SAM2 を git+ URL から手動でビルド（C++ 拡張 sam2._C を含む）。
 #    setup.py が import 時に torch を要求するため build isolation を切る。
@@ -60,20 +60,21 @@ pip list | grep -Ei '^(torch|torchvision|torchaudio|nvidia-)'
 
 ```bash
 # SAM2 (sam2.1_hiera_large)
-mkdir -p models/sam2
-curl -L -o models/sam2/sam2.1_hiera_large.pt \
+mkdir -p backend/models/sam2
+curl -L -o backend/models/sam2/sam2.1_hiera_large.pt \
     https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
 
 # Casper（Wan2.1-Fun-1.3B ベース）
 hf download alibaba-pai/Wan2.1-Fun-1.3B-InP \
-    --local-dir vendor/gen-omnimatte-public/models/Diffusion_Transformer/Wan2.1-Fun-1.3B-InP
+    --local-dir backend/vendor/gen-omnimatte-public/models/Diffusion_Transformer/Wan2.1-Fun-1.3B-InP
 gdown "1n3Sv4d0pbTjfa5UhypEhTaylrSy2X4C1" \
-    -O vendor/gen-omnimatte-public/models/Casper/wan2.1_fun_1.3b_casper.safetensors
+    -O backend/vendor/gen-omnimatte-public/models/Casper/wan2.1_fun_1.3b_casper.safetensors
 ```
 
 ## サーバ起動
 
 ```bash
+cd backend
 python run.py
 ```
 
@@ -86,6 +87,7 @@ python run.py
 サーバ側:
 
 ```bash
+cd backend
 python run.py
 ```
 
@@ -114,5 +116,5 @@ ssh -p <SSH_PORT> -N -L 8000:127.0.0.1:9000 user@gpu-server
 フロント側は `frontend/.env` の `VITE_API_BASE` をサーバ URL に設定する。詳細は [frontend/README.md](frontend/README.md)。
 
 モデルDL
-hf download alibaba-pai/Wan2.1-Fun-1.3B-InP --local-dir models/Diffusion_Transformer/Wan2.1-Fun-1.3B-InP
-gdown "1n3Sv4d0pbTjfa5UhypEhTaylrSy2X4C1" -O models/Casper/wan2.1_fun_1.3b_casper.safetensors
+hf download alibaba-pai/Wan2.1-Fun-1.3B-InP --local-dir backend/vendor/gen-omnimatte-public/models/Diffusion_Transformer/Wan2.1-Fun-1.3B-InP
+gdown "1n3Sv4d0pbTjfa5UhypEhTaylrSy2X4C1" -O backend/vendor/gen-omnimatte-public/models/Casper/wan2.1_fun_1.3b_casper.safetensors

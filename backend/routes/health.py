@@ -1,11 +1,11 @@
 from fastapi import APIRouter
 
-from server.casper import get_casper_state
-from server.detector import detectron2
-from server.full_foreground_store import full_foreground_store
-from server.sam import sam2
-from server.schemas import HealthResponse
-from server.session import session_slot
+from backend.casper import get_casper_state
+from backend.detector import detectron2
+from backend.full_foreground_store import full_foreground_store
+from backend.sam import sam2
+from backend.schemas import HealthResponse
+from backend.session import session_slot
 
 
 router = APIRouter()

@@ -20,10 +20,10 @@ sidecar は本サーバの lifespan が自動 spawn する。フロントから 
 
 ## 3.2 ディレクトリ／ファイル構成
 
-[02-architecture.md](02-architecture.md#22-ディレクトリ構成) の `server/` を参照。
+[02-architecture.md](02-architecture.md#22-ディレクトリ構成) の `backend/` を参照。
 
 ```
-server/                       # 本サーバ
+backend/                       # 本サーバ
 ├── __init__.py               # 空
 ├── main.py                   # FastAPI 起動、CORS、lifespan で SAM2 / Detectron2 ロード + sidecar spawn
 ├── model.py                  # SAM2 / Casper / Detectron2 設定値
@@ -57,12 +57,12 @@ casper_server/             # Casper sidecar
 
 ## 3.3 設定
 
-モデル関連の設定は [`model.py`](../../server/model.py) の冒頭にモジュールレベル定数としてハードコードされている。
+モデル関連の設定は [`model.py`](../../backend/model.py) の冒頭にモジュールレベル定数としてハードコードされている。
 
 | 定数 | 値 | 用途 |
 |---|---|---|
 | `SAM2_CFG` | `configs/sam2.1/sam2.1_hiera_l.yaml` | SAM2 設定ファイル（hydra で解決） |
-| `SAM2_CKPT` | `<project_root>/models/sam2/sam2.1_hiera_large.pt` | チェックポイントの絶対パス（`__file__` 起点で解決） |
+| `SAM2_CKPT` | `backend/models/sam2/sam2.1_hiera_large.pt` | チェックポイントの絶対パス（`__file__` 起点で解決） |
 | `SAM2_DEVICE` | `cuda` | SAM2 推論デバイス |
 | `DETECTRON2_CONFIG` | `COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml` | COCO Mask R-CNN の config（model_zoo 指定） |
 | `DETECTRON2_DEVICE` | `cuda` | 検出推論デバイス |
@@ -71,7 +71,7 @@ casper_server/             # Casper sidecar
 | `DETECTRON2_MIN_AREA_RATIO` | `0.001` | 画像面積の 0.1% 未満は誤検出として除外 |
 | `DETECTRON2_IOU_WITH_TARGET` | `0.3` | 対象前景との IoU がこれを超えた検出は対象本人として除外 |
 
-Casper（前景削除）関連の値はハードコードで、本サーバ・sidecar の双方から `server/model.py` を import して参照する。
+Casper（前景削除）関連の値はハードコードで、本サーバ・sidecar の双方から `backend/model.py` を import して参照する。
 
 | 定数 | 値 | 用途 |
 |---|---|---|
@@ -109,9 +109,9 @@ sidecar との通信は環境変数で制御する。
 
 ### 3.4.1 SAM2
 
-[`server/sam.py`](../../server/sam.py) に `Sam2` クラスを定義し、モジュール末尾でシングルトンインスタンス `sam2` を作る。`Sam2` は `Sam2VideoPredictor` をラップし、`add_bbox_prompt` で `add_new_points_or_box` に bbox を直接渡す。
+[`backend/sam.py`](../../backend/sam.py) に `Sam2` クラスを定義し、モジュール末尾でシングルトンインスタンス `sam2` を作る。`Sam2` は `Sam2VideoPredictor` をラップし、`add_bbox_prompt` で `add_new_points_or_box` に bbox を直接渡す。
 
-呼び出し側（`server/routes/*`、`server/full_foreground_store.py`）は `sam2` のみを介して SAM を扱い、autocast 等の詳細は `Sam2` 内に閉じ込められる。
+呼び出し側（`backend/routes/*`、`backend/full_foreground_store.py`）は `sam2` のみを介して SAM を扱い、autocast 等の詳細は `Sam2` 内に閉じ込められる。
 
 ### 3.4.2 ロードのライフサイクル
 
@@ -325,7 +325,7 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 | `/segment` | POST | frame_idx + bbox → base video＋マスク半透明合成済み mp4。完了時にマスクを `MaskStore` に保存 |
 | `/remove` | POST | 直近 SAM2 マスクで base video から前景削除 → 削除後 mp4。完了時にセッションのベース動画を新動画に差し替え、`MaskStore` をクリア |
 
-各エンドポイントは `server/routes/` 配下の個別ファイルで `APIRouter` として定義し、`main.py` が `include_router` でまとめて登録する。
+各エンドポイントは `backend/routes/` 配下の個別ファイルで `APIRouter` として定義し、`main.py` が `include_router` でまとめて登録する。
 
 ### 3.7.1 `/session` の処理フロー
 
@@ -443,7 +443,7 @@ Casper（前景削除）専用の小さな FastAPI。`vendor/gen-omnimatte-publi
 - リッスンアドレス: `127.0.0.1:{OMNIMATTE_CASPER_PORT}`（既定 `8765`）。`0.0.0.0` には bind しない
 - 標準出力・標準エラーは本サーバが `[casper] ` プレフィクス付きでメインログに混ぜる
 
-### 3.10.2 Casper クラス（`server/casper.py`）
+### 3.10.2 Casper クラス（`backend/casper.py`）
 
 `Sam2` ([§3.4](#34-モデルロードsampy)) と同じロード状態管理パターン。
 
@@ -614,7 +614,7 @@ MVP では自動再起動しない。
 ## 3.11 実装チェックリスト
 
 ### 本サーバ
-- [ ] `server/` のファイル構成が本仕様と一致
+- [ ] `backend/` のファイル構成が本仕様と一致
 - [ ] FastAPI 起動時に `asyncio.create_task(model_holder.load())` で SAM2 ロードが開始される
 - [ ] FastAPI 起動時に `OMNIMATTE_SPAWN_CASPER=1` のとき sidecar が spawn され、shutdown で停止する
 - [ ] sidecar の標準出力・標準エラーが本サーバログに `[casper] ` プレフィクス付きで流れる

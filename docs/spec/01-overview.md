@@ -97,6 +97,6 @@ SAM2 公式リポジトリの [`examples/segment_video_server.py`](https://githu
 ## 1.7 実装チェックリスト
 
 - [ ] Node.js / Python の必要バージョンが README に明記されている
-- [ ] `frontend/`, `server/`, `models/sam2/` のディレクトリ構造が [02-architecture.md](02-architecture.md) と一致
+- [ ] `frontend/`, `backend/`, `models/sam2/` のディレクトリ構造が [02-architecture.md](02-architecture.md) と一致
 - [ ] バックエンドは起動直後にモデルロードがバックグラウンドで開始される
 - [ ] フロントエンドの `VITE_API_BASE` でバックエンドURLが切り替えられる

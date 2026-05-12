@@ -5,17 +5,17 @@ import tempfile
 
 from fastapi import APIRouter, HTTPException, Response
 
-from server.casper import (
+from backend.casper import (
     CasperBusyError,
     CasperNotReadyError,
     CasperRunError,
     run_casper,
 )
-from server.full_foreground_store import full_foreground_store
-from server.mask_store import mask_store
-from server.sam import sam2
-from server.session import session_slot
-from server.video_io import probe_video
+from backend.full_foreground_store import full_foreground_store
+from backend.mask_store import mask_store
+from backend.sam import sam2
+from backend.session import session_slot
+from backend.video_io import probe_video
 
 
 router = APIRouter()
@@ -103,7 +103,7 @@ async def remove_foreground() -> Response:
     # base video が差し替わったので、全前景データも再生成する。
     # ここで再 propagate を待たない: lazy に /segment が wait_ready する。
     full_foreground_store.start_loading()
-    from server.routes.session import _extract_full_foreground  # 循環 import 回避のため遅延 import
+    from backend.routes.session import _extract_full_foreground  # 循環 import 回避のため遅延 import
     asyncio.create_task(_extract_full_foreground(new_session))
 
     return Response(content=mp4_bytes, media_type="video/mp4")

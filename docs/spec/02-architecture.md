@@ -76,7 +76,7 @@ omnimatte-editor/
 ├── README.md
 ├── docs/
 │   └── spec/                       # 本仕様書
-├── server/                         # 本サーバ（SAM2 担当）
+├── backend/                         # 本サーバ（SAM2 担当）。閉じた subproject
 │   ├── __init__.py                 # 空
 │   ├── main.py                     # FastAPI エントリ。lifespan で SAM2 ロード起動 + sidecar spawn
 │   ├── model.py                    # SAM2 モデルのロード状態管理 + SAM2 / Casper 設定値（ハードコード）
@@ -90,7 +90,14 @@ omnimatte-editor/
 │   │   ├── session.py
 │   │   ├── segment.py
 │   │   └── removal.py              # POST /remove
-│   └── schemas.py                  # Pydanticスキーマ
+│   ├── schemas.py                  # Pydanticスキーマ
+│   ├── run.py                      # 本サーバ起動スクリプト（uvicorn）。lifespan で sidecar も自動 spawn
+│   ├── requirements.txt            # backend の Python 依存。SAM2/Detectron2 は git+ URL から別途インストール
+│   ├── vendor/
+│   │   └── gen-omnimatte-public/   # Casper（Wan2.1-1.3B）リポジトリ（git submodule）
+│   └── models/
+│       └── sam2/
+│           └── sam2.1_hiera_large.pt   # SAM2 チェックポイント（README の手順でダウンロード）
 ├── casper_server/                  # Casper sidecar（前景削除担当）
 │   ├── __init__.py                 # 空
 │   ├── main.py                     # FastAPI エントリ。lifespan で Casper ロード起動
@@ -100,14 +107,6 @@ omnimatte-editor/
 │       ├── __init__.py
 │       ├── health.py               # GET /health
 │       └── run.py                  # POST /run （multipart）
-├── vendor/
-│   └── gen-omnimatte-public/       # Casper（Wan2.1-1.3B）リポジトリ（git submodule）
-├── models/
-│   └── sam2/
-│       └── sam2.1_hiera_large.pt   # SAM2 チェックポイント（README の手順でダウンロード）
-├── run.py                          # 本サーバ起動スクリプト（uvicorn）。lifespan で sidecar も自動 spawn
-├── run_casper.py                   # sidecar 単独起動スクリプト（クラウド分離・デバッグ用）
-├── requirements.txt                # 共通依存。SAM2/Detectron2 は git+ URL から別途インストール
 └── frontend/
     ├── package.json
     ├── electron.vite.config.ts
@@ -143,7 +142,7 @@ omnimatte-editor/
     └── README.md                   # フロントエンドの起動手順
 ```
 
-`vendor/gen-omnimatte-public/` は Casper モデル用にフォークしているリポジトリで、修正コードを抱えるため submodule で管理する。SAM2 と Detectron2 は upstream を修正していないので、git+ URL から直接 pip インストールする（README 参照）。
+`backend/vendor/gen-omnimatte-public/` は Casper モデル用にフォークしているリポジトリで、修正コードを抱えるため submodule で管理する。SAM2 と Detectron2 は upstream を修正していないので、git+ URL から直接 pip インストールする（README 参照）。
 
 ## 2.3 ビルド／起動の概要
 
@@ -151,17 +150,18 @@ omnimatte-editor/
 
 ```bash
 # 環境構築（初回のみ。project root で実行）
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 pip install --no-build-isolation 'git+https://github.com/facebookresearch/sam2.git@2b90b9f'
 pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
 
-# 起動（推奨・OS 非依存）
+# 起動（推奨・OS 非依存。frontend と対称に subproject 内で実行する）
+cd backend
 python run.py
 ```
 
-`run.py` は本サーバを uvicorn 起動するスクリプトで、本サーバの lifespan が **Casper sidecar (`casper_server`) を自動 spawn する**。ユーザーは追加コマンド不要。
+`backend/run.py` は本サーバを uvicorn 起動するスクリプトで、本サーバの lifespan が **Casper sidecar (`casper_server`) を自動 spawn する**。ユーザーは追加コマンド不要。
 
-uvicorn を直接使う場合は project root から `uvicorn server.main:app` でも可（同じく lifespan が sidecar を spawn する）。
+uvicorn を直接使う場合は project root から `uvicorn backend.main:app` でも可（同じく lifespan が sidecar を spawn する）。
 
 **sidecar を別マシンに分離する場合**: GPU マシン側で `python run_casper.py` を起動し、本サーバ側は `OMNIMATTE_SPAWN_CASPER=0` と `CASPER_SIDECAR_BASE=<sidecar URL>` を環境変数に設定する。
 
@@ -218,12 +218,12 @@ sequenceDiagram
 
 | モジュール | 責務 | 詳細仕様 |
 |---|---|---|
-| `server/main.py` | FastAPI 起動、ルータ登録、CORS、lifespan で SAM2 ロード起動 + sidecar spawn | [03-backend.md](03-backend.md) |
-| `server/model.py` | SAM2 モデルのロード状態管理 + SAM2 / Casper 設定値ハードコード | [03-backend.md](03-backend.md) |
-| `server/session.py` | 現在の `inference_state` と base video を保持する単一スロット。`swap_base_video` でベース動画差し替え | [03-backend.md](03-backend.md) |
-| `server/mask_store.py` | 直近 SAM2 マスクの単一スロット | [03-backend.md](03-backend.md) |
-| `server/casper_client.py` | sidecar への HTTP クライアント（`httpx`）。マスクを mp4 化して `POST /run` に送る | [03-backend.md](03-backend.md) |
-| `server/video_io.py` | mp4 デコード、base video＋マスクの半透明合成 mp4 エンコード、マスク → mp4 書き出し | [03-backend.md](03-backend.md) |
+| `backend/main.py` | FastAPI 起動、ルータ登録、CORS、lifespan で SAM2 ロード起動 + sidecar spawn | [03-backend.md](03-backend.md) |
+| `backend/model.py` | SAM2 モデルのロード状態管理 + SAM2 / Casper 設定値ハードコード | [03-backend.md](03-backend.md) |
+| `backend/session.py` | 現在の `inference_state` と base video を保持する単一スロット。`swap_base_video` でベース動画差し替え | [03-backend.md](03-backend.md) |
+| `backend/mask_store.py` | 直近 SAM2 マスクの単一スロット | [03-backend.md](03-backend.md) |
+| `backend/casper_client.py` | sidecar への HTTP クライアント（`httpx`）。マスクを mp4 化して `POST /run` に送る | [03-backend.md](03-backend.md) |
+| `backend/video_io.py` | mp4 デコード、base video＋マスクの半透明合成 mp4 エンコード、マスク → mp4 書き出し | [03-backend.md](03-backend.md) |
 | `casper_server/main.py` | Casper sidecar の FastAPI エントリ。lifespan で Casper プリロード | [03-backend.md](03-backend.md) |
 | `casper_server/holder.py` | Casper パイプラインのロード状態管理（SAM2 の `Sam2` クラスと同パターン） | [03-backend.md](03-backend.md) |
 | `casper_server/pipeline.py` | fork 済 `gen-omnimatte-public` の `predict_v2v.load_pipeline` を `importlib` で直接ロードして呼ぶ薄いラッパ。`run_one_seq` は本プロジェクト固有の出力フォーマット・前景のみ書き換え処理を含むため独自実装 | [03-backend.md](03-backend.md) |
@@ -235,8 +235,8 @@ sequenceDiagram
 
 ## 2.6 実装チェックリスト
 
-- [ ] `server/` と `frontend/src/renderer/` のディレクトリが本仕様どおりに配置されている
-- [ ] バックエンドは project root から `python run.py` または `uvicorn server.main:app` で起動できる
+- [ ] `backend/` と `frontend/src/renderer/` のディレクトリが本仕様どおりに配置されている
+- [ ] バックエンドは `cd backend && python run.py` または project root から `uvicorn backend.main:app` で起動できる
 - [ ] フロントエンドは `npm run dev` で Electron ウィンドウが開く
 - [ ] `VITE_API_BASE` でローカル/クラウドが切り替えられる
 - [ ] `OMNIMATTE_PORT` 環境変数でバックエンドのリッスンポートが切り替えられる

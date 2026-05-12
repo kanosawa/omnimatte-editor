@@ -22,7 +22,7 @@ import uuid
 import numpy as np
 import torch
 
-from server.model import (
+from backend.model import (
     CASPER_FPS,
     CASPER_MATTING_MODE,
     CASPER_NUM_INFERENCE_STEPS,
