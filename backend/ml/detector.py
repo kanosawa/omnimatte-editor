@@ -27,10 +27,7 @@ DetectorState = Literal["loading", "ready", "failed"]
 
 
 class Detectron2:
-    """Detectron2 の DefaultPredictor をプリロードして保持する。
-
-    `/health` で `detector_state` として状態を返す。
-    """
+    """Detectron2 の DefaultPredictor をプリロードして保持する。"""
 
     def __init__(self) -> None:
         self._state: DetectorState = "loading"

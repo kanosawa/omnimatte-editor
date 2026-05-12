@@ -1,26 +1,10 @@
-from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
-
-
-DetectorStateLiteral = Literal["loading", "ready", "failed"]
-SamStateLiteral = Literal["loading", "ready", "failed"]
-CasperStateLiteral = Literal["loading", "ready", "failed", "unreachable"]
-FullFgStateLiteral = Literal["empty", "loading", "ready", "failed"]
 
 
 class _CamelModel(BaseModel):
     """JSON では camelCase、Python 属性は snake_case の応答モデル基底。"""
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
-
-
-class HealthResponse(BaseModel):
-    status: Literal["ok"] = "ok"
-    detector_state: DetectorStateLiteral
-    sam_state: SamStateLiteral
-    casper_state: CasperStateLiteral
-    full_fg_state: FullFgStateLiteral
-    session_active: bool
 
 
 class VideoMeta(_CamelModel):
@@ -29,10 +13,6 @@ class VideoMeta(_CamelModel):
     fps: float
     num_frames: int
     duration_sec: float
-
-
-class StartSessionResponse(_CamelModel):
-    video_meta: VideoMeta
 
 
 class SegmentRequest(BaseModel):

@@ -86,7 +86,6 @@ omnimatte-editor/
 │   ├── video_io.py                 # mp4 読み書き、マスク → mp4 エンコード
 │   ├── routes/
 │   │   ├── __init__.py
-│   │   ├── health.py
 │   │   ├── session.py
 │   │   ├── segment.py
 │   │   └── removal.py              # POST /remove

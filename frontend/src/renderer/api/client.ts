@@ -1,8 +1,8 @@
-import type { SegmentRequest, SessionResponse } from "../types";
+import type { SegmentRequest, VideoMeta } from "../types";
 
 const API_BASE: string = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
-export async function uploadVideo(file: File): Promise<SessionResponse> {
+export async function uploadVideo(file: File): Promise<VideoMeta> {
   const fd = new FormData();
   fd.append("video", file);
   const res = await fetch(`${API_BASE}/session`, { method: "POST", body: fd });
@@ -10,7 +10,7 @@ export async function uploadVideo(file: File): Promise<SessionResponse> {
     const detail = await safeReadDetail(res);
     throw new Error(`session failed: ${res.status} ${detail}`);
   }
-  return (await res.json()) as SessionResponse;
+  return (await res.json()) as VideoMeta;
 }
 
 export async function segment(req: SegmentRequest): Promise<Blob> {

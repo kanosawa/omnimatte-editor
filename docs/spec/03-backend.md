@@ -35,7 +35,6 @@ backend/                       # 本サーバ
 ├── video_io.py               # mp4 デコード、合成 mp4 エンコード、trimask → mp4 エンコード、フレーム抽出
 ├── routes/
 │   ├── __init__.py
-│   ├── health.py
 │   ├── session.py
 │   ├── segment.py
 │   └── removal.py
@@ -171,8 +170,6 @@ async def wait_ready(self, timeout: float | None = None) -> None:
 ```
 
 ハンドラ側では `TimeoutError` / `RuntimeError` を 503 に変換。タイムアウトはハードコードで 5.0 秒（[04-api.md §4.7](04-api.md#47-タイムアウト方針)）。
-
-`/health` はこの待ち合わせを行わず、現在の `state` をそのまま返す。
 
 ## 3.5 セッション管理（`session.py`）
 
@@ -320,7 +317,6 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 
 | パス | メソッド | 概要 |
 |---|---|---|
-| `/health` | GET | サーバ稼働確認 + モデルロード状態 |
 | `/session` | POST | mp4 アップロード → セッション作成 |
 | `/segment` | POST | frame_idx + bbox → base video＋マスク半透明合成済み mp4。完了時にマスクを `MaskStore` に保存 |
 | `/remove` | POST | 直近 SAM2 マスクで base video から前景削除 → 削除後 mp4。完了時にセッションのベース動画を新動画に差し替え、`MaskStore` をクリア |
@@ -618,7 +614,6 @@ MVP では自動再起動しない。
 - [ ] FastAPI 起動時に `asyncio.create_task(model_holder.load())` で SAM2 ロードが開始される
 - [ ] FastAPI 起動時に `OMNIMATTE_SPAWN_CASPER=1` のとき sidecar が spawn され、shutdown で停止する
 - [ ] sidecar の標準出力・標準エラーが本サーバログに `[casper] ` プレフィクス付きで流れる
-- [ ] モデルロード未完了でも `/health` は応答し、`casper_state` も含む
 - [ ] モデルロード未完了の場合、`/session` / `/segment` / `/remove` は最大 5 秒待機して 503 を返す
 - [ ] `/session` で受け取った mp4 を一時ファイルに保存し、`init_state` を呼ぶ
 - [ ] `/session` のレスポンスは `videoMeta` のみを含む（`session_id` は返さない）

@@ -16,10 +16,6 @@ export type VideoMeta = {
   durationSec: number;
 };
 
-export type SessionResponse = {
-  videoMeta: VideoMeta;
-};
-
 export type SegmentRequest = {
   frame_idx: number;
   bbox: [number, number, number, number];

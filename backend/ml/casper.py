@@ -3,7 +3,7 @@
 ロード状態管理（`Casper` クラス）、同時実行制御（`run_lock`）、出力 mp4 の
 キャッシュ（`OutputCache`）、推論本体（`do_pipeline_run`）、および
 ルート（`/segment`、`/remove`）から呼ばれる高レベル API
-（`run_casper` / `preload_casper` / `get_casper_state`）を集約する。
+（`run_casper` / `preload_casper`）を集約する。
 
 以前は別プロセスの sidecar (`casper_server/`) に分離していたが、
 absl.flags の汚染が fork 版 `vendor/gen-omnimatte-public` で解消されたため、
@@ -261,11 +261,6 @@ def _do_pipeline_run(
 # ============================================================================
 # 高レベル API（routes から呼ばれる）
 # ============================================================================
-
-def get_casper_state() -> str:
-    """`/health` から参照される現在の Casper ロード状態。"""
-    return casper.state
-
 
 async def run_casper(
     base_video_path: str,

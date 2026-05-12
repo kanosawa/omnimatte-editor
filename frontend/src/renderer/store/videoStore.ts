@@ -136,8 +136,8 @@ export const useVideoStore = create<VideoStore>((set, get) => {
       videoElement.load();
 
       // バックエンドへアップロード
-      const res = await uploadVideo(file);
-      set({ videoMeta: res.videoMeta });
+      const videoMeta = await uploadVideo(file);
+      set({ videoMeta });
     },
 
     togglePlay: () => {

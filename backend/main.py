@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.ml.detector import detectron2
 from backend.ml.sam import sam2
 from backend.ml.casper import casper
-from backend.routes import health, removal, segment, session
+from backend.routes import removal, segment, session
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -44,7 +44,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(health.router)
 app.include_router(session.router)
 app.include_router(segment.router)
 app.include_router(removal.router)

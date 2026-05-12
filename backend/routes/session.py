@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from backend.media.video_io import probe_video, read_frame_at
 from backend.ml.detector import detectron2
 from backend.ml.sam import sam2
-from backend.schemas import StartSessionResponse, VideoMeta
+from backend.schemas import VideoMeta
 from backend.stores.full_foreground_store import full_foreground_store
 from backend.stores.mask_store import mask_store
 from backend.stores.session import Session, session_slot
@@ -20,8 +20,8 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.post("/session", response_model=StartSessionResponse)
-async def start_session(video: UploadFile = File(...)) -> StartSessionResponse:
+@router.post("/session", response_model=VideoMeta)
+async def start_session(video: UploadFile = File(...)) -> VideoMeta:
     try:
         await sam2.wait_ready(timeout=5.0)
     except TimeoutError as exc:
@@ -57,7 +57,7 @@ async def start_session(video: UploadFile = File(...)) -> StartSessionResponse:
         full_foreground_store.start_loading()
 
         # 全前景抽出（R-CNN + SAM propagate）はバックグラウンドで実行。
-        # `/session` は即時 videoMeta を返し、`/segment` 側で wait_ready する。
+        # `/session` は即時 VideoMeta を返し、`/segment` 側で wait_ready する。
         asyncio.create_task(_extract_full_foreground(session))
     except HTTPException:
         if os.path.exists(tmp_path):
@@ -69,14 +69,12 @@ async def start_session(video: UploadFile = File(...)) -> StartSessionResponse:
         logger.exception("session creation failed")
         raise HTTPException(status_code=500, detail="failed to create session")
 
-    return StartSessionResponse(
-        video_meta=VideoMeta(
-            width=session.width,
-            height=session.height,
-            fps=session.fps,
-            num_frames=session.num_frames,
-            duration_sec=session.num_frames / session.fps if session.fps > 0 else 0.0,
-        ),
+    return VideoMeta(
+        width=session.width,
+        height=session.height,
+        fps=session.fps,
+        num_frames=session.num_frames,
+        duration_sec=session.num_frames / session.fps if session.fps > 0 else 0.0,
     )
 
 

@@ -15,7 +15,7 @@ frontend/src/renderer/
 ├── main.tsx                  # React エントリ（ReactDOM.createRoot）
 ├── App.tsx                   # トップレベル。3段レイアウトを構成
 ├── api/
-│   └── client.ts             # /health, /session, /segment 呼び出し
+│   └── client.ts             # /session, /segment, /remove 呼び出し
 ├── components/
 │   ├── TopBar/
 │   │   ├── TopBar.tsx
@@ -122,12 +122,12 @@ flowchart TD
 
 ```ts
 // api/client.ts のおおまかなインターフェース
-export async function uploadVideo(file: File): Promise<SessionResponse>;
+export async function uploadVideo(file: File): Promise<VideoMeta>;
 export async function segment(req: SegmentRequest): Promise<Blob>;
 export async function removeForeground(): Promise<Blob>;
 ```
 
-`videoStore` のアクション内でこれらを呼び、状態を更新する。`/health` はフロントからはポーリングしない（バックエンド側でロード完了を待ち合わせるため）。
+`videoStore` のアクション内でこれらを呼び、状態を更新する。モデルロード未完了の場合は `/session` 呼び出し時にバックエンド側で `wait_ready(5.0)` がブロックする。
 
 ## 5.7 環境変数
 

@@ -12,43 +12,11 @@
 
 | パス | メソッド | 概要 |
 |---|---|---|
-| `/health` | GET | 稼働確認とモデルロード状態 |
 | `/session` | POST | mp4 アップロード（multipart） |
 | `/segment` | POST | BBox を指定して base video＋マスク半透明合成済み mp4 を取得 |
 | `/remove` | POST | 直近 SAM2 マスクで base video から前景削除した mp4 を取得（サーバ側でベース動画も差し替え） |
 
-## 4.3 `/health`
-
-### Request
-
-`GET /health`
-
-### Response (200)
-
-```json
-{
-  "status": "ok",
-  "detector_state": "loading",
-  "sam_state": "loading",
-  "casper_state": "loading",
-  "full_fg_state": "empty",
-  "session_active": false
-}
-```
-
-| フィールド | 型 | 説明 |
-|---|---|---|
-| `status` | string | `"ok"` 固定 |
-| `detector_state` | string | Detectron2 (COCO Mask R-CNN) のロード状態。`"loading"` / `"ready"` / `"failed"` |
-| `sam_state` | string | SAM2 backend のロード状態。`"loading"` / `"ready"` / `"failed"` |
-| `casper_state` | string | Casper sidecar のロード状態。`"loading"` / `"ready"` / `"failed"` / `"unreachable"`（sidecar に接続できない） |
-| `full_fg_state` | string | 全前景抽出（R-CNN + SAM propagation）の状態。`"empty"`（未開始）/ `"loading"`（バックグラウンド実行中）/ `"ready"` / `"failed"` |
-| `session_active` | boolean | 現在セッションが存在するか（バックエンドは常に最大1件） |
-
-### 用途
-
-- バックエンド側でも参照可能な外形監視用エンドポイント
-- フロントエンド本体はポーリングしない（`/session` 呼び出し時にバックエンドが `wait_ready(5.0)` でロード完了を待ち合わせるため）
+ヘルスチェック用のエンドポイントは提供しない。モデルロード未完了で `/session` 等が呼ばれた場合はバックエンド側で `wait_ready(5.0)` がブロックし、超過時に 503 を返す。
 
 ## 4.4 `/session`
 
@@ -63,22 +31,20 @@
 
 ```json
 {
-  "videoMeta": {
-    "width": 1920,
-    "height": 1080,
-    "fps": 29.97,
-    "numFrames": 600,
-    "durationSec": 20.02
-  }
+  "width": 1920,
+  "height": 1080,
+  "fps": 29.97,
+  "numFrames": 600,
+  "durationSec": 20.02
 }
 ```
 
 | フィールド | 型 | 説明 |
 |---|---|---|
-| `videoMeta.width` / `videoMeta.height` | number | ピクセル単位 |
-| `videoMeta.fps` | number | 浮動小数点 |
-| `videoMeta.numFrames` | number | 総フレーム数 |
-| `videoMeta.durationSec` | number | `numFrames / fps` |
+| `width` / `height` | number | ピクセル単位 |
+| `fps` | number | 浮動小数点 |
+| `numFrames` | number | 総フレーム数 |
+| `durationSec` | number | `numFrames / fps` |
 
 セッション ID は返さない。バックエンドは常に最大 1 件のセッションだけを保持し、新規 `/session` 呼び出し時は直前のセッションが自動的に破棄される（[03-backend.md §3.5.2](03-backend.md#352-ライフタイム)）。
 
@@ -92,7 +58,7 @@
 
 ### フロントエンドの取り扱い
 
-- レスポンスの `video_meta` は zustand ストアに保存し、UI 表示（時間・総フレーム数）に利用
+- レスポンス（`VideoMeta`）は zustand ストアに `videoMeta` として保存し、UI 表示（時間・総フレーム数）に利用
 - `videoMeta !== null` を「セッション保持中」のフラグとして使う（`session_id` を持たないため）
 
 ## 4.5 `/segment`
@@ -184,7 +150,6 @@
 
 | 操作 | バックエンド側タイムアウト | フロント側のリトライ |
 |---|---|---|
-| `/health` | なし（即応答） | フロントからは現状ポーリングしない |
 | `/session` | モデル待機 5 秒 → 503 | 自動リトライしない。失敗時はユーザーにエラー表示 |
 | `/segment` | モデル待機 5 秒 → 503。推論自体には上限なし | 自動リトライしない |
 | `/remove` | モデル待機 5 秒 → 503。Casper 推論自体には上限なし（数分〜数十分） | 自動リトライしない。`fetch` にタイムアウトを設定しない |
@@ -197,7 +162,7 @@
 
 ```ts
 // /session
-async function uploadVideo(file: File): Promise<SessionResponse> {
+async function uploadVideo(file: File): Promise<VideoMeta> {
   const fd = new FormData();
   fd.append("video", file);
   const res = await fetch(`${API_BASE}/session`, { method: "POST", body: fd });
@@ -226,8 +191,7 @@ async function removeForeground(): Promise<Blob> {
 
 ## 4.9 実装チェックリスト
 
-- [ ] `/health` がモデルロード状態を返す
-- [ ] `/session` が multipart で mp4 を受け、`videoMeta` を返す（`session_id` は返さない）
+- [ ] `/session` が multipart で mp4 を受け、`VideoMeta`（width / height / fps / numFrames / durationSec）を返す（`session_id` は返さない）
 - [ ] `/segment` が base video＋マスク半透明合成済み mp4 をバイナリで返す
 - [ ] `/segment` を `/session` 未呼び出しで叩くと 409 を返す
 - [ ] `/remove` が前景削除済み mp4 をバイナリで返す
