@@ -16,9 +16,9 @@ class _CamelModel(BaseModel):
 
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
+    detector_state: DetectorStateLiteral
     model_state: ModelStateLiteral
     casper_state: CasperStateLiteral
-    detector_state: DetectorStateLiteral
     full_fg_state: FullFgStateLiteral
     session_active: bool
 
