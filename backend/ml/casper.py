@@ -23,16 +23,21 @@ from typing import Any, Literal
 
 import numpy as np
 
-from backend.config import (
-    CASPER_DEFAULT_PROMPT,
-    CASPER_STARTUP_TIMEOUT_SEC,
-    CASPER_TRANSFORMER_PATH,
-)
+from backend.config import CASPER_STARTUP_TIMEOUT_SEC
 from backend.media.video_io import write_trimask_mp4
-from backend.ml.casper_pipeline import build_default_config, load_pipeline, run_one_seq
+from backend.ml.casper_pipeline import (
+    CASPER_TRANSFORMER_PATH,
+    build_default_config,
+    load_pipeline,
+    run_one_seq,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+# Casper への prompt 既定値。リクエスト側で省略された場合に使う。
+CASPER_DEFAULT_PROMPT = "a clean background video."
 
 
 # ============================================================================
@@ -201,6 +206,7 @@ def _do_pipeline_run(
     trimask_path: str,
     width: int,
     height: int,
+    fps: float,
     prompt: str,
 ) -> bytes:
     """既に一時ファイルとして配置された動画・トリマスクで Casper を回し、mp4 バイトを返す。
@@ -210,6 +216,8 @@ def _do_pipeline_run(
     `trimask_path` は 3 値 trimask（0=remove / 128=neutral / 255=keep）の mp4。
     seq_dir には `trimask_00.mp4` として配置し、`mask_*.mp4` は置かないことで
     gen-omnimatte の trimask 読み込み経路に流す。
+
+    `fps` は出力 mp4 のフレームレート。入力動画の fps をそのまま渡す。
     """
     snap_h = _round_to_multiple_of_16(height)
     snap_w = _round_to_multiple_of_16(width)
@@ -241,6 +249,7 @@ def _do_pipeline_run(
             seq_dir,
             save_dir,
             sample_size,
+            fps,
         )
 
         with open(out_path, "rb") as f:
@@ -312,6 +321,7 @@ async def run_casper(
                         trimask_path,
                         width,
                         height,
+                        fps,
                         CASPER_DEFAULT_PROMPT,
                     )
                 except ValueError as exc:
@@ -377,6 +387,7 @@ async def preload_casper(
                     trimask_path,
                     width,
                     height,
+                    fps,
                     CASPER_DEFAULT_PROMPT,
                 )
             except Exception:

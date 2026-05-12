@@ -10,8 +10,6 @@ from typing import Literal
 import numpy as np
 
 from backend.config import (
-    DETECTRON2_CONFIG,
-    DETECTRON2_DEVICE,
     DETECTRON2_MAX_DETECTIONS,
     DETECTRON2_MIN_AREA_RATIO,
     DETECTRON2_SCORE_THRESH,
@@ -19,6 +17,10 @@ from backend.config import (
 
 
 logger = logging.getLogger(__name__)
+
+
+# detectron2 model_zoo 内の固定 config 名。モデル選定そのものに紐づくため定数扱い。
+DETECTRON2_CONFIG = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
 
 
 DetectorState = Literal["loading", "ready", "failed"]
@@ -57,8 +59,8 @@ class Detectron2:
         cfg.merge_from_file(model_zoo.get_config_file(DETECTRON2_CONFIG))
         cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(DETECTRON2_CONFIG)
         cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = DETECTRON2_SCORE_THRESH
-        cfg.MODEL.DEVICE = DETECTRON2_DEVICE
-        logger.info("loading Detectron2: %s device=%s", DETECTRON2_CONFIG, DETECTRON2_DEVICE)
+        cfg.MODEL.DEVICE = "cuda"
+        logger.info("loading Detectron2: %s device=cuda", DETECTRON2_CONFIG)
         predictor = DefaultPredictor(cfg)
         logger.info("Detectron2 model loaded")
         return predictor

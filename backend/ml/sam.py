@@ -13,15 +13,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Iterator, Literal
 
 import numpy as np
 import torch
 
-from backend.config import SAM2_CFG, SAM2_CKPT, SAM2_DEVICE
-
 
 logger = logging.getLogger(__name__)
+
+
+# モデル重みとアーキテクチャ定義は backend/scripts/setup.sh のダウンロード設定と
+# 一対一で対応している。変更する場合は setup.sh も同時に更新すること。
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SAM2_CFG = "configs/sam2.1/sam2.1_hiera_l.yaml"
+SAM2_CKPT = os.path.join(_BACKEND_DIR, "models", "sam2", "sam2.1_hiera_large.pt")
 
 
 SamState = Literal["loading", "ready", "failed"]
@@ -55,10 +61,10 @@ class Sam2:
         from sam2.build_sam import build_sam2_video_predictor
 
         logger.info(
-            "loading SAM2 model: cfg=%s ckpt=%s device=%s",
-            SAM2_CFG, SAM2_CKPT, SAM2_DEVICE,
+            "loading SAM2 model: cfg=%s ckpt=%s device=cuda",
+            SAM2_CFG, SAM2_CKPT,
         )
-        predictor = build_sam2_video_predictor(SAM2_CFG, SAM2_CKPT, device=SAM2_DEVICE)
+        predictor = build_sam2_video_predictor(SAM2_CFG, SAM2_CKPT, device="cuda")
         logger.info("SAM2 model loaded")
         return predictor
 
@@ -93,19 +99,19 @@ class Sam2:
 
     def init_state(self, video_path: str) -> Any:
         predictor = self._require_predictor()
-        with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             return predictor.init_state(video_path=video_path)
 
     def reset_state(self, state: Any) -> None:
         predictor = self._require_predictor()
-        with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             predictor.reset_state(state)
 
     # ---------- マスク登録 ----------
 
     def add_mask(self, state: Any, frame_idx: int, obj_id: int, mask: np.ndarray) -> None:
         predictor = self._require_predictor()
-        with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             predictor.add_new_mask(
                 inference_state=state,
                 frame_idx=frame_idx,
@@ -125,7 +131,7 @@ class Sam2:
     ) -> np.ndarray:
         predictor = self._require_predictor()
         box = np.asarray(bbox, dtype=np.float32)  # xyxy pixel
-        with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             _, out_obj_ids, video_res_masks = predictor.add_new_points_or_box(
                 inference_state=state,
                 frame_idx=frame_idx,
@@ -152,7 +158,7 @@ class Sam2:
         reverse: bool = False,
     ) -> Iterator[PropagateItem]:
         predictor = self._require_predictor()
-        with torch.inference_mode(), torch.autocast(SAM2_DEVICE, dtype=torch.bfloat16):
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(
                 state, start_frame_idx=start_frame_idx, reverse=reverse,
             ):

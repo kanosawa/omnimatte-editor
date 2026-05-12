@@ -3,9 +3,15 @@ import logging
 from contextlib import asynccontextmanager
 
 # `_ModuleLock` deadlock 対策
-import torch  # noqa: F401
+import torch
 import torchvision  # noqa: F401
 import torchvision.ops  # noqa: F401
+
+if not torch.cuda.is_available():
+    raise RuntimeError(
+        "CUDA is required but not available. "
+        "This backend supports CUDA-only execution."
+    )
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

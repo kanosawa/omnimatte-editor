@@ -9,9 +9,9 @@
 通常の `from ... import` 構文では取り込めない。`importlib` でファイル
 パスから直接ロードする。
 
-`run_one_seq` は本プロジェクト固有の出力フォーマット・前景のみ書き換え
-処理・末尾フレームのトリミング等を含むため、上流の `run_inference` には
-置き換えず、`load_pipeline` で得たパイプラインを使って独自に実装する。
+`run_one_seq` は本プロジェクト固有の出力フォーマット・末尾フレームの
+トリミング等を含むため、上流の `run_inference` には置き換えず、
+`load_pipeline` で得たパイプラインを使って独自に実装する。
 """
 import importlib.util
 import logging
@@ -22,20 +22,21 @@ import uuid
 import numpy as np
 import torch
 
-from backend.config import (
-    CASPER_FPS,
-    CASPER_MATTING_MODE,
-    CASPER_NUM_INFERENCE_STEPS,
-    CASPER_REPO_DIR,
-    CASPER_TEMPORAL_WINDOW_SIZE,
-    CASPER_TRANSFORMER_PATH,
-    FG_REPLACE_DIFF_THRESHOLD,
-    FG_REPLACE_MASK_DILATE,
-    FOREGROUND_ONLY_REPLACE,
-)
-
 
 logger = logging.getLogger(__name__)
+
+
+# vendor 配下の gen-omnimatte-public とその中の Casper safetensors。
+# backend/scripts/setup.sh の gdown / vendoring と一対一で対応するため定数扱い。
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CASPER_REPO_DIR = os.path.join(_BACKEND_DIR, "vendor", "gen-omnimatte-public")
+CASPER_TRANSFORMER_PATH = os.path.join(
+    CASPER_REPO_DIR, "models", "Casper", "wan2.1_fun_1.3b_casper.safetensors"
+)
+# 本仕様で固定の Casper パイプライン設定値（運用で切り替えない）
+CASPER_MATTING_MODE = "all_fg"
+CASPER_NUM_INFERENCE_STEPS = 1
+CASPER_TEMPORAL_WINDOW_SIZE = 21
 
 
 def _ensure_repo_on_path() -> None:
@@ -50,10 +51,9 @@ def build_default_config():
     from config.default_wan import get_config
 
     cfg = get_config()
-    # 本仕様の上書き値（sample_size はリクエスト毎に run_one_seq で上書き）
+    # 本仕様の上書き値（sample_size / 出力 fps はリクエスト毎に動的に決まるためここでは設定しない）
     cfg.experiment.matting_mode = CASPER_MATTING_MODE
     cfg.experiment.skip_if_exists = False
-    cfg.data.fps = CASPER_FPS
     cfg.video_model.transformer_path = CASPER_TRANSFORMER_PATH
     cfg.video_model.num_inference_steps = CASPER_NUM_INFERENCE_STEPS
     cfg.video_model.temporal_window_size = CASPER_TEMPORAL_WINDOW_SIZE
@@ -105,6 +105,7 @@ def run_one_seq(
     seq_dir: str,
     save_dir: str,
     sample_size: tuple[int, int],
+    fps: float,
 ) -> str:
     """1 シーケンスについて Casper を走らせ、出力 mp4 のパスを返す。
 
@@ -114,6 +115,10 @@ def run_one_seq(
     `sample_size` は `(height, width)` の int タプル。両次元とも 16 の倍数で
     なければならない（Wan2.1 の VAE / patch サイズ制約）。呼び出し側で
     丸めること。
+
+    `fps` は出力 mp4 のフレームレート。Casper パイプライン本体は fps 非依存で
+    フレームを離散的に処理するため、ここでは保存時にしか使わない。入力動画の
+    fps をそのまま渡すと再生時の時間軸が保存される。
     """
     _ensure_repo_on_path()
 
@@ -178,20 +183,7 @@ def run_one_seq(
     prefix = save_video_name + f"-{uuid.uuid4().hex[:8]}"
     video_path = os.path.join(save_dir, prefix + ".mp4")
 
-    if FOREGROUND_ONLY_REPLACE:
-        # 前景部分のみ Casper 出力で書き換え、それ以外は base video の画素を保持。
-        # 判定マスク = (SAM2 マスクを dilate) AND (Casper-base の per-pixel diff > 閾値)（案 D）
-        casper_frames = _tensor_to_uint8_rgb_frames(sample)
-        composite_frames = _compose_foreground_only(
-            casper_frames=casper_frames,
-            input_video_path=os.path.join(seq_dir, "input_video.mp4"),
-            mask_video_path=os.path.join(seq_dir, "mask_00.mp4"),
-            diff_threshold=FG_REPLACE_DIFF_THRESHOLD,
-            mask_dilate=FG_REPLACE_MASK_DILATE,
-        )
-        _save_uint8_frames_high_quality(composite_frames, video_path, fps=cfg.data.fps)
-    else:
-        _save_video_high_quality(sample, video_path, fps=cfg.data.fps)
+    _save_video_high_quality(sample, video_path, fps=fps)
     return video_path
 
 
@@ -234,90 +226,9 @@ def _save_uint8_frames_high_quality(frames, path: str, fps: float) -> None:
 
 
 def _save_video_high_quality(sample, path: str, fps: float) -> None:
-    """`(B, C, T, H, W)` のテンソル（[0, 1]）を高品質 mp4 に書き出す（後方互換ラッパ）。"""
+    """`(B, C, T, H, W)` のテンソル（[0, 1]）を高品質 mp4 に書き出す。"""
     frames = _tensor_to_uint8_rgb_frames(sample)
     _save_uint8_frames_high_quality(frames, path, fps)
-
-
-def _compose_foreground_only(
-    casper_frames: list[np.ndarray],
-    input_video_path: str,
-    mask_video_path: str,
-    diff_threshold: int,
-    mask_dilate: int,
-) -> list[np.ndarray]:
-    """Casper 出力フレームと base video を、判定マスクに基づいて合成する。
-
-    判定マスク = (SAM2 マスクを `mask_dilate` ピクセル dilate) AND
-                 (Casper と base の per-channel max diff > `diff_threshold`)
-
-    判定マスクが立っている画素 → Casper 出力で書き換え
-    判定マスクが立っていない画素 → base video の画素を保持
-
-    引数:
-      `casper_frames`: list of `(H, W, 3)` uint8 RGB（`_tensor_to_uint8_rgb_frames` の出力）
-      `input_video_path`: base video の絶対パス
-      `mask_video_path`: SAM2 が生成したバイナリマスク mp4（白=対象前景）
-      `diff_threshold`: 0-255 の per-channel 差分しきい値
-      `mask_dilate`: SAM2 マスクの dilate 半径ピクセル
-
-    戻り値: list of `(H_base, W_base, 3)` uint8 RGB。base video 解像度に揃えて返す。
-    """
-    import cv2
-
-    # 1. base video を全フレーム RGB で読み込む
-    base_frames = _decode_video_rgb(input_video_path)
-    if not base_frames:
-        raise RuntimeError(f"failed to decode base video: {input_video_path}")
-    base_h, base_w = base_frames[0].shape[:2]
-
-    # 2. SAM2 マスクを bool で読み込み（白=前景）
-    sam2_masks = _decode_video_mask(mask_video_path)
-
-    # 3. フレーム数を揃える（最小に切る）
-    n = min(len(casper_frames), len(base_frames), len(sam2_masks))
-    if n == 0:
-        raise RuntimeError("no frames to compose")
-
-    # 4. dilate カーネル（楕円）
-    dilate_kernel = None
-    if mask_dilate > 0:
-        k = 2 * mask_dilate + 1
-        dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-
-    out: list[np.ndarray] = []
-    for i in range(n):
-        casper_frame = casper_frames[i]
-        base_frame = base_frames[i]
-        sam2_mask = sam2_masks[i]
-
-        # Casper を base 解像度に合わせる（解像度ミスマッチがある場合）
-        if casper_frame.shape[:2] != (base_h, base_w):
-            casper_frame = cv2.resize(
-                casper_frame, (base_w, base_h), interpolation=cv2.INTER_LINEAR
-            )
-
-        # SAM2 マスクを base 解像度に合わせて dilate
-        if sam2_mask.shape != (base_h, base_w):
-            sam2_mask = cv2.resize(
-                sam2_mask.astype(np.uint8), (base_w, base_h), interpolation=cv2.INTER_NEAREST
-            ) > 0
-        if dilate_kernel is not None:
-            sam2_mask = cv2.dilate(sam2_mask.astype(np.uint8), dilate_kernel, iterations=1) > 0
-
-        # diff > threshold（per-channel max）
-        diff = np.abs(casper_frame.astype(np.int16) - base_frame.astype(np.int16)).max(axis=-1)
-        diff_mask = diff > diff_threshold
-
-        # 案 D: AND
-        modified = sam2_mask & diff_mask
-
-        # 合成
-        composite = base_frame.copy()
-        composite[modified] = casper_frame[modified]
-        out.append(composite)
-
-    return out
 
 
 def _get_video_frame_count(path: str) -> int:
@@ -331,42 +242,3 @@ def _get_video_frame_count(path: str) -> int:
         return int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     finally:
         cap.release()
-
-
-def _decode_video_rgb(path: str) -> list[np.ndarray]:
-    """mp4 を全フレーム RGB (H, W, 3) uint8 として読み込む。"""
-    import cv2
-
-    cap = cv2.VideoCapture(path)
-    if not cap.isOpened():
-        return []
-    frames: list[np.ndarray] = []
-    try:
-        while True:
-            ret, frame_bgr = cap.read()
-            if not ret or frame_bgr is None:
-                break
-            frames.append(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-    finally:
-        cap.release()
-    return frames
-
-
-def _decode_video_mask(path: str) -> list[np.ndarray]:
-    """マスク mp4 を全フレーム bool (H, W) として読み込む。白(>127)=前景。"""
-    import cv2
-
-    cap = cv2.VideoCapture(path)
-    if not cap.isOpened():
-        return []
-    frames: list[np.ndarray] = []
-    try:
-        while True:
-            ret, frame_bgr = cap.read()
-            if not ret or frame_bgr is None:
-                break
-            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-            frames.append(gray > 127)
-    finally:
-        cap.release()
-    return frames
