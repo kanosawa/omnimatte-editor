@@ -58,18 +58,19 @@ pip list | grep -Ei '^(torch|torchvision|torchaudio|nvidia-)'
 
 ### モデル重みのダウンロード
 
-```bash
-# SAM2 (sam2.1_hiera_large)
-mkdir -p backend/models/sam2
-curl -L -o backend/models/sam2/sam2.1_hiera_large.pt \
-    https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
+SAM2 / Casper の重みを一括ダウンロードする:
 
-# Casper（Wan2.1-Fun-1.3B ベース）
-hf download alibaba-pai/Wan2.1-Fun-1.3B-InP \
-    --local-dir backend/vendor/gen-omnimatte-public/models/Diffusion_Transformer/Wan2.1-Fun-1.3B-InP
-gdown "1n3Sv4d0pbTjfa5UhypEhTaylrSy2X4C1" \
-    -O backend/vendor/gen-omnimatte-public/models/Casper/wan2.1_fun_1.3b_casper.safetensors
+```bash
+cd backend
+python scripts/download_models.py
 ```
+
+ダウンロード先:
+- SAM2: `backend/models/sam2/sam2.1_hiera_large.pt`
+- Casper Diffusion Transformer: `backend/vendor/gen-omnimatte-public/models/Diffusion_Transformer/Wan2.1-Fun-1.3B-InP/`
+- Casper safetensors: `backend/vendor/gen-omnimatte-public/models/Casper/wan2.1_fun_1.3b_casper.safetensors`
+
+既に存在するファイルはスキップするので、途中で失敗しても再実行で続きから取得できる。
 
 ## サーバ起動
 
@@ -114,7 +115,3 @@ ssh -p <SSH_PORT> -N -L 8000:127.0.0.1:9000 user@gpu-server
 > Casper sidecar（GPU マシン内部の `127.0.0.1:8765`）は本サーバが内部で呼ぶため、SSH トンネルは `8000` だけで OK。
 
 フロント側は `frontend/.env` の `VITE_API_BASE` をサーバ URL に設定する。詳細は [frontend/README.md](frontend/README.md)。
-
-モデルDL
-hf download alibaba-pai/Wan2.1-Fun-1.3B-InP --local-dir backend/vendor/gen-omnimatte-public/models/Diffusion_Transformer/Wan2.1-Fun-1.3B-InP
-gdown "1n3Sv4d0pbTjfa5UhypEhTaylrSy2X4C1" -O backend/vendor/gen-omnimatte-public/models/Casper/wan2.1_fun_1.3b_casper.safetensors
