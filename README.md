@@ -11,29 +11,38 @@
   - macOS: `brew install ffmpeg`
   - Windows: `winget install ffmpeg`
 
-### 依存パッケージのインストール
+### 推奨環境（torch / CUDA）
 
-**順序が重要**: 先に `requirements.txt`（冒頭で torch を CUDA 12.4 wheel に固定済み）→ 続いて SAM2 と Detectron2 をビルド、という順で入れる。これを逆順にすると、SAM2/Detectron2 が古い torch を持ち込んだ後に他依存が「より新しい torch」を要求してアップグレードチェーンが走り、**CUDA 12 系と 13 系の nvidia-* ライブラリが混在してパフォーマンスが激しく劣化**する（cuDNN/cuBLAS の不整合で SDPA が math fallback に落ち、Casper の 1 diffusion step が秒単位で遅くなる）。
+torch / torchvision / torchaudio / CUDA は `requirements.txt` で固定していない。ユーザが自分の GPU と CUDA に合わせて先に install する。
+
+**推奨**:
+- `torch 2.5.x` + CUDA 12.4 系（`torch==2.5.1+cu124` で動作確認済み）
+- 推奨から大きく離れなければ、数年は本リポジトリの他の依存と問題なく組み合わせ可能
+
+**避けるべき構成**:
+- CUDA 12 系と 13 系の `nvidia-*` ライブラリ混在（cuDNN / cuBLAS の不整合で SDPA が math fallback に落ち、Casper の 1 diffusion step が秒単位で遅くなる）
+- 大きく離れた torch バージョン（後述 `transformers<5` 制約により torch 2.7+ は組み合わせ困難）
+
+### 依存パッケージのインストール
 
 ```bash
 # 0. (推奨) 既存の torch / nvidia-* 系を一度クリーンにする
 pip uninstall -y torch torchvision torchaudio \
     $(pip list 2>/dev/null | awk '/^nvidia-/ {print $1}')
 
-# 1. 共通依存をインストール（torch 2.5.1+cu124 が requirements.txt 冒頭で
-#    --extra-index-url 経由に固定されているので、ここで全部解決される）
+# 1. ビルドツールを最新化
 pip install --upgrade pip setuptools wheel ninja
-pip install -r backend/requirements.txt
 
-# 2. SAM2 を git+ URL から手動でビルド（C++ 拡張 sam2._C を含む）。
-#    setup.py が import 時に torch を要求するため build isolation を切る。
-#    再現性のため commit を pin する。
-pip install --no-build-isolation \
-    'git+https://github.com/facebookresearch/sam2.git@2b90b9f'
+# 2. torch を先に install する（推奨: 2.5.x + CUDA 12.4 系。
+#    GPU / CUDA バージョンに合わせて --index-url を選ぶ）
+pip install torch~=2.5.0 torchvision~=0.20.0 torchaudio~=2.5.0 \
+    --index-url https://download.pytorch.org/whl/cu124
 
-# 3. Detectron2 を git+ URL から手動でビルド。同じ理由で build isolation を切る。
-pip install --no-build-isolation \
-    'git+https://github.com/facebookresearch/detectron2.git'
+# 3. 残りの依存を install する。
+#    SAM2 / Detectron2 はコミット pin 済みで requirements.txt 内に含まれており、
+#    両者の setup.py は import 時に outer env の torch を要求するため
+#    --no-build-isolation が必須（手順 2 で入れた torch を借用してビルドする）。
+pip install --no-build-isolation -r backend/requirements.txt
 ```
 
 ### 検証
@@ -52,8 +61,8 @@ pip list | grep -Ei '^(torch|torchvision|torchaudio|nvidia-)'
 ```
 
 期待する状態:
-- `torch 2.5.1+cu124` / `torchvision 0.20.1+cu124` / `torchaudio 2.5.1+cu124`
-- `nvidia-*-cu12` のみ（`-cu13` 系が混在していないこと）
+- `torch` / `torchvision` / `torchaudio` が全て同じ CUDA タグ（例 `+cu124`）で揃っている
+- `nvidia-*` ライブラリの CUDA メジャーが混在していない（`-cu12` 系で揃う、など）
 - `from sam2 import _C` が例外なしで通る
 
 ### モデル重みのダウンロード

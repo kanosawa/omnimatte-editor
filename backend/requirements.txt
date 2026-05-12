@@ -1,51 +1,61 @@
-fastapi
-uvicorn[standard]
-python-multipart
-pydantic
-numpy
-opencv-python
-imageio-ffmpeg
-decord
-huggingface_hub
-hf_transfer
-gdown
+# torch / torchvision / torchaudio はここに含めない。
+# ユーザが自分の CUDA 環境に合わせて先に install する。推奨バージョンは README 参照。
+# 本ファイルの各パッケージは major-cap だけ付けて minor/patch は浮動。
+# 推奨 torch (現時点 2.5.x) から大きく離れなければ数年単位で動く想定。
 
-# SAM2 と Detectron2 は git+ URL から直接インストールする（README 参照）。
-# どちらも setup.py が import 時に torch を要求するため、build isolation を切る必要がある:
-#   pip install --upgrade pip setuptools wheel ninja
-#   pip install --no-build-isolation 'git+https://github.com/facebookresearch/sam2.git@2b90b9f'
-#   pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
+# ---------- Web framework / API ----------
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.9,<1
+pydantic>=2.0,<3
 
-# Casper sidecar 用（gen-omnimatte-public 依存。gradio / tensorboard / ray /
-# flash_attn / xfuser / comfy / hpsv2 / datasets 等の sidecar API で使わない依存は
-# 意図的に除外。albumentations は dataset_image_video.py が utils 経由で常時 import
-# されるため必須）
-diffusers>=0.30.1
-# transformers 5.x は torch >= 2.7 を要求するため、torch 2.5.1 固定と衝突する。
-# 4.x 系の最新を使う。
+# ---------- Numerical / Image / Video ----------
+numpy>=1.24,<3
+opencv-python>=4.5,<5
+imageio-ffmpeg>=0.4,<1
+decord>=0.6,<1
+mediapy>=1.2,<2
+imageio[ffmpeg]>=2.30,<3
+imageio[pyav]>=2.30,<3
+scikit-image>=0.21,<1
+scipy>=1.10,<2
+matplotlib>=3.7,<4
+kornia>=0.7,<1
+albumentations>=1.3,<3
+
+# ---------- HuggingFace / Models / Downloading ----------
+huggingface_hub>=0.20,<1
+hf_transfer>=0.1,<1
+gdown>=5.0,<6
+
+# ---------- Diffusion / Casper deps ----------
+# transformers 5.x は torch >= 2.7 を要求するため、推奨 torch 2.5.x と衝突する。
+# 4.x 系に閉じる。
+diffusers>=0.30,<1
 transformers>=4.46.2,<5
-accelerate>=0.25.0
-ml_collections
-absl-py
-omegaconf
-einops
-safetensors
-loguru
-mediapy
-imageio[ffmpeg]
-imageio[pyav]
-torchdiffeq
-torchsde
-SentencePiece
-protobuf
-ftfy
-func_timeout
-kornia
-timm
-scikit-image
-scipy
-matplotlib
-tomesd
-beautifulsoup4
-requests
-albumentations
+accelerate>=0.25,<2
+safetensors>=0.4,<1
+einops>=0.7,<1
+ml_collections>=0.1,<1
+absl-py>=1.0,<3
+omegaconf>=2.3,<3
+torchdiffeq>=0.2,<1
+torchsde>=0.2,<1
+SentencePiece>=0.2,<1
+timm>=0.9,<2
+tomesd>=0.1,<1
+
+# ---------- Misc ----------
+loguru>=0.7,<1
+protobuf>=4.0,<7
+ftfy>=6.0,<7
+func_timeout>=4.0,<5
+beautifulsoup4>=4.10,<5
+requests>=2.28,<3
+
+# ---------- SAM2 / Detectron2 (commit pin) ----------
+# 両方とも setup.py が import 時に torch を要求するため、本ファイル全体を
+# `pip install --no-build-isolation -r requirements.txt` で入れる必要がある
+# （outer env の torch を借用してビルドする）。詳細は README 参照。
+sam2 @ git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4
+detectron2 @ git+https://github.com/facebookresearch/detectron2.git@b599f139756bd3646a26a909caf86a1a159e53a7
