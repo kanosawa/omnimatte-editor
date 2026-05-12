@@ -2,7 +2,7 @@
 # backend の依存パッケージとモデル重みを一括セットアップする (Ubuntu 想定)。
 # 事前に torch / torchvision / torchaudio を CUDA 環境に合わせて入れておくこと。
 
-set -euo pipefail
+set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BACKEND_DIR="$(dirname "$HERE")"
