@@ -7,6 +7,7 @@ opencv-python
 imageio-ffmpeg
 decord
 huggingface_hub
+hf_transfer
 gdown
 
 # SAM2 と Detectron2 は git+ URL から直接インストールする（README 参照）。
