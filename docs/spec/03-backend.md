@@ -465,7 +465,7 @@ lifespan で `asyncio.create_task(casper.load())` で非同期ロード開始。
 
 ### 3.10.3 Pipeline ラッパ（`casper_server/pipeline.py`）
 
-fork 済 `vendor/gen-omnimatte-public/inference/wan2.1_fun/predict_v2v.py` の `load_pipeline` を **`importlib` 経由で直接ロードして呼ぶ薄いラッパ**。`run_one_seq` は本プロジェクト固有の出力フォーマット・前景のみ書き換え処理・末尾フレームのトリミング等を含むため、上流の `run_inference` には置き換えず独自実装する。
+fork 済 `vendor/gen-omnimatte-public/inference/wan21_fun/predict_v2v.py`（upstream は `wan2.1_fun` だが、ドット混入で Python の import 文に乗らないため本フォークでリネーム済）の `load_pipeline` を呼ぶ薄いラッパ。`run_one_seq` は本プロジェクト固有の出力フォーマット・前景のみ書き換え処理・末尾フレームのトリミング等を含むため、上流の `run_inference` には置き換えず独自実装する。
 
 | 関数 | 概要 |
 |---|---|

@@ -1,19 +1,16 @@
 """gen-omnimatte-public のパイプラインを呼ぶ薄いラッパ。
 
-`vendor/gen-omnimatte-public/inference/wan2.1_fun/predict_v2v.py` を fork 済
+`vendor/gen-omnimatte-public/inference/wan21_fun/predict_v2v.py` を fork 済
 （absl 系が `if __name__ == "__main__"` 内に閉じ込められ、`config_path` /
 `model_name` が `__file__` 相対の絶対パスに解決される）の前提で、その
-`load_pipeline` を直接呼ぶ。
-
-`predict_v2v.py` のディレクトリ名 `wan2.1_fun` にドットが含まれるため
-通常の `from ... import` 構文では取り込めない。`importlib` でファイル
-パスから直接ロードする。
+`load_pipeline` を直接呼ぶ。upstream のディレクトリ名 `wan2.1_fun` は
+ドット混入で Python の import 文に乗らないため、本フォークでは `wan21_fun`
+にリネームしている。
 
 `run_one_seq` は本プロジェクト固有の出力フォーマット・末尾フレームの
 トリミング等を含むため、上流の `run_inference` には置き換えず、
 `load_pipeline` で得たパイプラインを使って独自に実装する。
 """
-import importlib.util
 import logging
 import os
 import sys
@@ -60,40 +57,18 @@ def build_default_config():
     return cfg
 
 
-_predict_v2v_module = None
-
-
-def _get_predict_v2v():
-    """`inference/wan2.1_fun/predict_v2v.py` を遅延ロードして返す。
-
-    `wan2.1_fun` ディレクトリ名にドットを含むため通常の import 構文が
-    使えない。`importlib.util` でファイルパスから直接モジュールを生成する。
-    一度ロードしたらモジュールスコープにキャッシュして再利用する。
-    """
-    global _predict_v2v_module
-    if _predict_v2v_module is not None:
-        return _predict_v2v_module
-
-    _ensure_repo_on_path()
-    path = os.path.join(CASPER_REPO_DIR, "inference", "wan2.1_fun", "predict_v2v.py")
-    spec = importlib.util.spec_from_file_location("_casper_predict_v2v", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"failed to load predict_v2v from {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    _predict_v2v_module = module
-    return module
-
-
 def load_pipeline(cfg):
     """gen-omnimatte-public の `predict_v2v.load_pipeline` を直接呼ぶ薄いラッパ。
 
-    fork 済 `predict_v2v.py` は absl 系が `if __name__ == "__main__"` に閉じ
-    込められているので、import 副作用なしで取り込める。`cfg.video_model.config_path` /
-    `cfg.video_model.model_name` も `default_wan.get_config()` で `__file__`
-    相対の絶対パスに解決済みなので、`os.chdir` は不要。
+    fork 済 `predict_v2v.py` は absl 系が `if __name__ == "__main__"` に
+    閉じ込められているので、import 副作用なしで取り込める。
+    `cfg.video_model.config_path` / `cfg.video_model.model_name` も
+    `default_wan.get_config()` で `__file__` 相対の絶対パスに解決済みなので、
+    `os.chdir` は不要。
     """
-    return _get_predict_v2v().load_pipeline(cfg)
+    _ensure_repo_on_path()
+    from inference.wan21_fun import predict_v2v
+    return predict_v2v.load_pipeline(cfg)
 
 
 @torch.no_grad()
