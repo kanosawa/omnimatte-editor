@@ -3,6 +3,8 @@ import logging
 import os
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from backend.config import MODEL_STARTUP_TIMEOUT_SEC
 from backend.media.video_io import VideoMetadata, probe_video, read_frame_at
 from backend.ml.detector import detectron2
@@ -74,13 +76,16 @@ class Session:
                     keyframe_idx=middle_frame_idx,
                 )
             else:
-                object_masks = []
+                object_masks = np.zeros(
+                    (0, self.meta.num_frames, self.meta.height, self.meta.width),
+                    dtype=bool,
+                )
 
             self.full_foreground_store.set_ready(
                 object_masks=object_masks,
                 base_video_path=self.base_video_path,
             )
-            logger.info("full foreground extraction complete: %d objects", len(object_masks))
+            logger.info("full foreground extraction complete: %d objects", object_masks.shape[0])
         except Exception as exc:
             logger.exception("full foreground extraction failed")
             self.full_foreground_store.set_failed(str(exc))

@@ -63,12 +63,10 @@ class Sam2:
         self,
         bboxes: list[list[float]],
         keyframe_idx: int,
-    ) -> list[np.ndarray]:
-        
+    ) -> np.ndarray:
+        """戻り値は (N, T, H, W) bool。N = len(bboxes)。"""
         num_frames, height, width = self._dims()
-        object_masks: list[np.ndarray] = [
-            np.zeros((num_frames, height, width), dtype=bool) for _ in bboxes
-        ]
+        object_masks = np.zeros((len(bboxes), num_frames, height, width), dtype=bool)
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             self._predictor.reset_state(self._state)
             for obj_id, bbox in enumerate(bboxes):
@@ -83,7 +81,7 @@ class Sam2:
                     self._state, start_frame_idx=keyframe_idx, reverse=reverse,
                 ):
                     for i, oid in enumerate(obj_ids):
-                        object_masks[oid][frame_idx] = (mask_logits[i, 0] > 0.0).cpu().numpy()
+                        object_masks[oid, frame_idx] = (mask_logits[i, 0] > 0.0).cpu().numpy()
             self._predictor.reset_state(self._state)
         return object_masks
 

@@ -396,10 +396,10 @@ flowchart TB
     B --> C["中間フレーム読込: read_frame_at(base_video_path, num_frames//2)"]
     C --> D["Detectron2 で検出 (class-agnostic)<br/>area 降順で上位 DETECTRON2_MAX_DETECTIONS 個"]
     D --> E{検出数}
-    E -- 0 --> F["full_foreground_store.set_ready(per_object_masks=[])"]
+    E -- 0 --> F["full_foreground_store.set_ready(object_masks=(0, T, H, W) ndarray)"]
     E -- "1+" --> G["SAM2: 各 mask を add_new_mask + propagate (順方向 + 逆方向)"]
     G --> H["predictor.reset_state (segment 用にクリア)"]
-    H --> I["full_foreground_store.set_ready(per_object_masks=[per-frame masks])"]
+    H --> I["full_foreground_store.set_ready(object_masks=(N, T, H, W) ndarray)"]
 ```
 
 失敗時は `full_foreground_store.set_failed(error)` に遷移し、後続の `/segment` は 503 を返す。

@@ -79,22 +79,24 @@ async def segment(req: SegmentRequest) -> Response:
     # R-CNN 検出物体から、対象前景と高 IoU のものを除外（領域単位）。
     # IoU は req.frame_idx 時点で計算（BBox を打ったフレーム）
     target_at_frame = masks_target[req.frame_idx]
-    other_fg_combined = np.zeros_like(masks_target, dtype=bool)
-    excluded = 0
-    kept = 0
-    for obj_masks in full_fg.object_masks:
-        if obj_masks.shape != masks_target.shape:
-            logger.warning(
-                "skip object: shape mismatch %s vs %s",
-                obj_masks.shape, masks_target.shape,
-            )
-            continue
-        iou = _compute_iou(target_at_frame, obj_masks[req.frame_idx])
-        if iou > DETECTRON2_IOU_WITH_TARGET:
-            excluded += 1
-            continue
-        other_fg_combined |= obj_masks
-        kept += 1
+    om = full_fg.object_masks  # (N, T, H, W)
+    if om.shape[0] == 0:
+        other_fg_combined = np.zeros_like(masks_target, dtype=bool)
+        kept = 0
+        excluded = 0
+    else:
+        om_at_frame = om[:, req.frame_idx]  # (N, H, W)
+        inter = np.logical_and(om_at_frame, target_at_frame).reshape(om.shape[0], -1).sum(axis=1)
+        union = np.logical_or(om_at_frame, target_at_frame).reshape(om.shape[0], -1).sum(axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            iou = np.where(union > 0, inter / union, 0.0)
+        keep_flags = iou <= DETECTRON2_IOU_WITH_TARGET  # (N,)
+        kept = int(keep_flags.sum())
+        excluded = int(om.shape[0] - kept)
+        if keep_flags.any():
+            other_fg_combined = om[keep_flags].any(axis=0)  # (T, H, W)
+        else:
+            other_fg_combined = np.zeros_like(masks_target, dtype=bool)
     logger.info(
         "trimask: target_at_frame_pixels=%d, other_fg_objects kept=%d excluded=%d",
         int(target_at_frame.sum()), kept, excluded,
@@ -138,14 +140,3 @@ async def segment(req: SegmentRequest) -> Response:
     )
 
     return Response(content=mp4_bytes, media_type="video/mp4")
-
-
-def _compute_iou(a: np.ndarray, b: np.ndarray) -> float:
-    """2 つのバイナリマスクの IoU。形状が違うときは 0 を返す。"""
-    if a.shape != b.shape:
-        return 0.0
-    inter = np.logical_and(a, b).sum()
-    union = np.logical_or(a, b).sum()
-    if union == 0:
-        return 0.0
-    return float(inter) / float(union)
