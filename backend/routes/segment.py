@@ -68,30 +68,25 @@ async def segment(req: SegmentRequest) -> Response:
     if full_fg.base_video_path != session.base_video_path:
         raise HTTPException(status_code=409, detail="full foreground data is stale")
 
-    state = session.inference_state
     results: dict[int, np.ndarray] = {}
 
     try:
         # 1. backend に bbox プロンプトを登録（video predictor の
         #    add_new_points_or_box に bbox を直接渡す）。
         #    呼び出し側はリセットしてから登録 → 順 / 逆 propagate するだけ。
-        sam2.reset_state(state)
+        sam2.reset()
         sam2.add_bbox_prompt(
-            state=state,
             frame_idx=req.frame_idx,
             obj_id=0,
             bbox=req.bbox,
-            base_video_path=session.base_video_path,
             height=session.height,
             width=session.width,
         )
 
-        for frame_idx, _obj_ids, masks in sam2.propagate(
-            state, start_frame_idx=req.frame_idx, num_frames=session.num_frames,
-        ):
+        for frame_idx, _obj_ids, masks in sam2.propagate(start_frame_idx=req.frame_idx):
             results[frame_idx] = masks[0]
         for frame_idx, _obj_ids, masks in sam2.propagate(
-            state, start_frame_idx=req.frame_idx, num_frames=session.num_frames, reverse=True,
+            start_frame_idx=req.frame_idx, reverse=True,
         ):
             results[frame_idx] = masks[0]
     except Exception:

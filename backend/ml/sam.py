@@ -1,24 +1,20 @@
 """SAM2 video predictor wrapper.
 
-`sam2` パッケージ（pip install 経由）の `Sam2VideoPredictor` をラップする。
+`sam2` パッケージ(pip install 経由)の `Sam2VideoPredictor` をラップする。
 `add_bbox_prompt` は video predictor の `add_new_points_or_box` に bbox を直接渡し、
-返ってきた `video_res_masks`（元解像度 logits）を bool 化して返す。SAM2 が想定する
-正規の box prompt パスを使うことで、prompt embedding が memory bank に正しく入る。
+返ってきた `video_res_masks`(元解像度 logits)を bool 化して返す。
 
-各メソッドは `torch.inference_mode()` + `torch.autocast(bf16)` で囲む。
-SAM2 公式の notebook と同じ設定で、Ampere 以降の GPU で bf16 Tensor Core を使い
-matmul を約 2 倍高速化する（image encoder / memory attention / propagate の支配的コスト）。
+アプリ全体で同時に存在する SAM2 セッションは常に最大 1 件なので、`inference_state`
+はこのクラス内部に持ち、呼び出し側には不透明ハンドルとして渡さない。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-from typing import Any, Iterator
-
 import numpy as np
 import torch
-
+from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +38,7 @@ PropagateItem = tuple[int, list[int], list[np.ndarray]]
 class Sam2:
     def __init__(self) -> None:
         self._predictor = None
+        self._state: Any = None
         self._error: str | None = None
         self._ready_event = asyncio.Event()
 
@@ -83,20 +80,27 @@ class Sam2:
             raise RuntimeError("SAM2 predictor not loaded")
         return self._predictor
 
-    def init_state(self, video_path: str) -> Any:
+    def _require_state(self) -> Any:
+        if self._state is None:
+            raise RuntimeError("SAM2 session not opened")
+        return self._state
+
+    def open_session(self, video_path: str) -> None:
         predictor = self._require_predictor()
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            return predictor.init_state(video_path=video_path)
+            self._state = predictor.init_state(video_path=video_path)
 
-    def reset_state(self, state: Any) -> None:
+    def reset(self) -> None:
         predictor = self._require_predictor()
+        state = self._require_state()
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             predictor.reset_state(state)
 
     # ---------- マスク登録 ----------
 
-    def add_mask(self, state: Any, frame_idx: int, obj_id: int, mask: np.ndarray) -> None:
+    def add_mask(self, frame_idx: int, obj_id: int, mask: np.ndarray) -> None:
         predictor = self._require_predictor()
+        state = self._require_state()
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             predictor.add_new_mask(
                 inference_state=state,
@@ -107,15 +111,14 @@ class Sam2:
 
     def add_bbox_prompt(
         self,
-        state: Any,
         frame_idx: int,
         obj_id: int,
         bbox: list[float],
-        base_video_path: str,  # 直接 box を渡すので未使用
         height: int,
         width: int,
     ) -> np.ndarray:
         predictor = self._require_predictor()
+        state = self._require_state()
         box = np.asarray(bbox, dtype=np.float32)  # xyxy pixel
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             _, out_obj_ids, video_res_masks = predictor.add_new_points_or_box(
@@ -138,12 +141,11 @@ class Sam2:
 
     def propagate(
         self,
-        state: Any,
         start_frame_idx: int,
-        num_frames: int,  # SAM2 では未使用
         reverse: bool = False,
     ) -> Iterator[PropagateItem]:
         predictor = self._require_predictor()
+        state = self._require_state()
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(
                 state, start_frame_idx=start_frame_idx, reverse=reverse,

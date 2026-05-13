@@ -81,9 +81,9 @@ async def remove_foreground() -> Response:
         raise HTTPException(status_code=500, detail=str(exc))
 
     try:
-        new_inference_state = sam2.init_state(video_path=new_video_path)
+        sam2.open_session(video_path=new_video_path)
     except Exception:
-        logger.exception("init_state failed for new base video")
+        logger.exception("open_session failed for new base video")
         if os.path.exists(new_video_path):
             os.unlink(new_video_path)
         raise HTTPException(
@@ -93,7 +93,6 @@ async def remove_foreground() -> Response:
 
     new_session = session_slot.swap_base_video(
         new_base_video_path=new_video_path,
-        new_inference_state=new_inference_state,
         width=new_meta.width,
         height=new_meta.height,
         fps=new_meta.fps,

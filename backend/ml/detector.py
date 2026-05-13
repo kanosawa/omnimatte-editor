@@ -20,7 +20,6 @@ DETECTRON2_CONFIG = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
 
 
 class Detectron2:
-    """Detectron2 の DefaultPredictor をプリロードして保持する。"""
 
     def __init__(self) -> None:
         self._predictor = None

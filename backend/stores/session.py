@@ -3,7 +3,6 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
 
 
 logger = logging.getLogger(__name__)
@@ -11,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Session:
-    inference_state: Any
     base_video_path: str
     width: int
     height: int
@@ -26,9 +24,11 @@ class SessionSlot:
     新しいセッションを `replace` で投入すると、直前のセッションは
     自動的に破棄され、関連する一時ファイルも削除される。
 
-    `swap_base_video` は同一セッションの base video（と inference_state /
-    メタ情報）を差し替える。`/remove` 完了時にカスケード（前景削除済み動画
-    → 次の base video）を実現するために使う。
+    `swap_base_video` は同一セッションの base video（とメタ情報）を差し替える。
+    `/remove` 完了時にカスケード（前景削除済み動画 → 次の base video）を
+    実現するために使う。SAM2 の `inference_state` は `Sam2` クラスが内部で
+    保持するので、ここでは扱わない（呼び出し側で `sam2.open_session()` を
+    別途呼ぶこと）。
     """
 
     def __init__(self) -> None:
@@ -37,7 +37,6 @@ class SessionSlot:
 
     def replace(
         self,
-        inference_state: Any,
         base_video_path: str,
         width: int,
         height: int,
@@ -45,7 +44,6 @@ class SessionSlot:
         num_frames: int,
     ) -> Session:
         new_session = Session(
-            inference_state=inference_state,
             base_video_path=base_video_path,
             width=width,
             height=height,
@@ -63,7 +61,6 @@ class SessionSlot:
     def swap_base_video(
         self,
         new_base_video_path: str,
-        new_inference_state: Any,
         width: int,
         height: int,
         fps: float,
@@ -71,10 +68,10 @@ class SessionSlot:
     ) -> Session:
         """ベース動画を差し替える（`/remove` 完了時に使う）。
 
-        旧 base video のファイルを削除し、`inference_state` を新値に置き換える。
-        セッションそのものは維持される（`session_id` などは元から無いが、
-        フロントから見て「同じセッションの続き」として扱われる）。
-        呼び出し側で `MaskStore.clear()` を別途呼ぶこと。
+        旧 base video のファイルを削除する。セッションそのものは維持される
+        （`session_id` などは元から無いが、フロントから見て「同じセッションの
+        続き」として扱われる）。呼び出し側で `sam2.open_session()` と
+        `MaskStore.clear()` を別途呼ぶこと。
         """
         old_path: str | None = None
         with self._lock:
@@ -82,7 +79,6 @@ class SessionSlot:
                 raise RuntimeError("no active session to swap base video")
             old_path = self._current.base_video_path
             self._current = Session(
-                inference_state=new_inference_state,
                 base_video_path=new_base_video_path,
                 width=width,
                 height=height,

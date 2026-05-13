@@ -43,10 +43,9 @@ async def start_session(video: UploadFile = File(...)) -> VideoMeta:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
-        inference_state = sam2.init_state(video_path=tmp_path)
+        sam2.open_session(video_path=tmp_path)
 
         session = session_slot.replace(
-            inference_state=inference_state,
             base_video_path=tmp_path,
             width=meta.width,
             height=meta.height,
@@ -83,8 +82,8 @@ async def _extract_full_foreground(session: Session) -> None:
     """中間フレームに COCO Mask R-CNN を実行 → 各検出を SAM で全フレームに propagate。
 
     結果を `full_foreground_store` に保存する。`/session` 完了後にバックグラウンドで実行される。
-    SAM inference_state を共有して使うが、最後に reset_state してから返るので、
-    後続の `/segment` は通常通り state を使える。
+    SAM2 のセッション状態（`sam2._state`）を共有して使うが、最後に `sam2.reset()`
+    してから返るので、後続の `/segment` は通常通り使える。
     """
     base_video_path = session.base_video_path
     try:
@@ -129,7 +128,6 @@ def _propagate_detected_masks(
 
     返り値: list of (T, H, W) bool。検出物体 1 つあたり 1 枚。
     """
-    state = session.inference_state
     n_objects = len(detected_masks)
     n_frames = session.num_frames
     h, w = session.height, session.width
@@ -138,24 +136,20 @@ def _propagate_detected_masks(
         np.zeros((n_frames, h, w), dtype=bool) for _ in range(n_objects)
     ]
 
-    sam2.reset_state(state)
+    sam2.reset()
     for obj_id, mask in enumerate(detected_masks):
-        sam2.add_mask(
-            state=state, frame_idx=keyframe_idx, obj_id=obj_id, mask=mask,
-        )
+        sam2.add_mask(frame_idx=keyframe_idx, obj_id=obj_id, mask=mask)
 
-    for frame_idx, obj_ids, masks in sam2.propagate(
-        state, start_frame_idx=keyframe_idx, num_frames=n_frames,
-    ):
+    for frame_idx, obj_ids, masks in sam2.propagate(start_frame_idx=keyframe_idx):
         for i, obj_id in enumerate(obj_ids):
             per_object[obj_id][frame_idx] = masks[i]
     for frame_idx, obj_ids, masks in sam2.propagate(
-        state, start_frame_idx=keyframe_idx, num_frames=n_frames, reverse=True,
+        start_frame_idx=keyframe_idx, reverse=True,
     ):
         for i, obj_id in enumerate(obj_ids):
             per_object[obj_id][frame_idx] = masks[i]
 
     # /segment が後でクリーンな state を使えるように reset
-    sam2.reset_state(state)
+    sam2.reset()
 
     return per_object
