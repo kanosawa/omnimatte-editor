@@ -9,7 +9,7 @@ from backend.config import MODEL_STARTUP_TIMEOUT_SEC
 from backend.media.video_io import VideoMetadata, probe_video, read_frame_at
 from backend.ml.detector import detectron2
 from backend.ml.sam import sam2
-from backend.state.stores.full_foreground import FullForegroundStore
+from backend.state.stores.full_foreground import FullForegroundRecord, FullForegroundStore
 from backend.state.stores.mask import MaskStore
 
 
@@ -31,8 +31,9 @@ class Session:
     extraction_task: asyncio.Task | None = field(default=None, init=False)
 
     def start_extraction(self) -> None:
-        """全前景抽出をバックグラウンドで起動する。"""
-        self.extraction_task = asyncio.create_task(self._extract_full_foreground())
+        """全前景抽出をバックグラウンドで起動する。
+        """
+        self.extraction_task = self.full_foreground_store.submit(self._produce_full_foreground())
 
     async def wait_for_extraction(self) -> None:
         """抽出タスクの完了を待つ。
@@ -54,41 +55,36 @@ class Session:
         except OSError:
             logger.warning("failed to remove video file: %s", self.base_video_path)
 
-    async def _extract_full_foreground(self) -> None:
+    async def _produce_full_foreground(self) -> FullForegroundRecord:
         """中間フレームに COCO Mask R-CNN で物体検出 → 各 bbox を SAM で全フレームに propagate。
         """
-        try:
-            await detectron2.wait_ready(timeout=MODEL_STARTUP_TIMEOUT_SEC)
+        await detectron2.wait_ready(timeout=MODEL_STARTUP_TIMEOUT_SEC)
 
-            # 中間フレームを BGR で取得
-            middle_frame_idx = self.meta.num_frames // 2
-            frame_bgr = await asyncio.to_thread(read_frame_at, self.base_video_path, middle_frame_idx)
+        # 中間フレームを BGR で取得
+        middle_frame_idx = self.meta.num_frames // 2
+        frame_bgr = await asyncio.to_thread(read_frame_at, self.base_video_path, middle_frame_idx)
 
-            # Detectron2 で物体検出（class-agnostic、bbox のみ）
-            detected_bboxes = await asyncio.to_thread(detectron2.detect, frame_bgr)
-            logger.info("R-CNN detected %d objects on frame %d", len(detected_bboxes), middle_frame_idx)
+        # Detectron2 で物体検出（class-agnostic、bbox のみ）
+        detected_bboxes = await asyncio.to_thread(detectron2.detect, frame_bgr)
+        logger.info("R-CNN detected %d objects on frame %d", len(detected_bboxes), middle_frame_idx)
 
-            # 検出が 0 のときは SAM propagate を skip
-            if detected_bboxes:
-                object_masks = await asyncio.to_thread(
-                    sam2.segment_from_bboxes,
-                    detected_bboxes,
-                    keyframe_idx=middle_frame_idx,
-                )
-            else:
-                object_masks = np.zeros(
-                    (0, self.meta.num_frames, self.meta.height, self.meta.width),
-                    dtype=bool,
-                )
-
-            self.full_foreground_store.set_ready(
-                object_masks=object_masks,
-                base_video_path=self.base_video_path,
+        # 検出が 0 のときは SAM propagate を skip
+        if detected_bboxes:
+            object_masks = await asyncio.to_thread(
+                sam2.segment_from_bboxes,
+                detected_bboxes,
+                keyframe_idx=middle_frame_idx,
             )
-            logger.info("full foreground extraction complete: %d objects", object_masks.shape[0])
-        except Exception as exc:
-            logger.exception("full foreground extraction failed")
-            self.full_foreground_store.set_failed(str(exc))
+        else:
+            object_masks = np.zeros(
+                (0, self.meta.num_frames, self.meta.height, self.meta.width),
+                dtype=bool,
+            )
+        logger.info("full foreground extraction complete: %d objects", object_masks.shape[0])
+        return FullForegroundRecord(
+            object_masks=object_masks,
+            base_video_path=self.base_video_path,
+        )
 
 
 class SessionSlot:
@@ -115,7 +111,6 @@ class SessionSlot:
             base_video_path=video_path,
             meta=meta,
         )
-        session.full_foreground_store.start_loading()
         self._install(session)
         session.start_extraction()
         return session

@@ -206,7 +206,7 @@ sequenceDiagram
     U->>FE: 前景削除ボタン
     FE->>BE: POST /remove (空ボディ)
     BE->>BE: MaskStore から masks 取り出し + Casper を subprocess で起動
-    BE->>BE: 出力 mp4 で base video を差し替え + inference_state を再構築 + MaskStore.clear()
+    BE->>BE: 出力 mp4 で base video を差し替え + inference_state を再構築（旧 Session ごと GC で MaskStore も破棄）
     BE-->>FE: foreground-removed mp4 binary
     FE->>FE: video.src を新 base video に差し替え + hasSegmentation=false
 ```

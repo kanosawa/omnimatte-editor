@@ -1,4 +1,3 @@
-import threading
 from dataclasses import dataclass
 
 import numpy as np
@@ -19,16 +18,8 @@ class MaskRecord:
 
 
 class MaskStore:
-    """per-session スロット。`Session` が 1 個ずつ所有する。
-
-    `/segment` 完了時に `set` で trimask を入れ、`/remove` で読み出す。
-    新しい `/session` / `/remove` 時には旧 Session ごと GC されるので、
-    明示的な clear は不要（メソッドは API として残してある）。
-    """
-
     def __init__(self) -> None:
         self._current: MaskRecord | None = None
-        self._lock = threading.Lock()
 
     def set(self, trimask: np.ndarray, base_video_path: str, fps: float) -> MaskRecord:
         record = MaskRecord(
@@ -36,14 +27,8 @@ class MaskStore:
             base_video_path=base_video_path,
             fps=fps,
         )
-        with self._lock:
-            self._current = record
+        self._current = record
         return record
 
     def current(self) -> MaskRecord | None:
-        with self._lock:
-            return self._current
-
-    def clear(self) -> None:
-        with self._lock:
-            self._current = None
+        return self._current

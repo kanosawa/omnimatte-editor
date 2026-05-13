@@ -203,7 +203,7 @@ class Session:
 | メソッド | 役割 |
 |---|---|
 | `replace(...)` | 新規セッションをスロットに投入。直前のセッションがあれば破棄（base video の一時ファイル削除）してから差し替える |
-| `swap_base_video(new_video_path, new_meta, new_inference_state)` | `/remove` 完了時にベース動画を差し替える。旧 base video のファイルを削除し、`inference_state` を新動画で再構築した値を採用し、`width / height / fps / num_frames` を新メタで上書きする。`MaskStore.clear()` も併せて呼ぶ |
+| `swap_base_video(new_video_path, new_meta, new_inference_state)` | `/remove` 完了時にベース動画を差し替える。旧 base video のファイルを削除し、`inference_state` を新動画で再構築した値を採用し、`width / height / fps / num_frames` を新メタで上書きする。MaskStore は旧 Session ごと GC されるので明示的にクリアしない |
 | `current() -> Session \| None` | 現在のセッションを取得。存在しなければ `None` |
 | `is_active() -> bool` | セッションが存在するか |
 
@@ -212,7 +212,7 @@ class Session:
 ### 3.5.2 ライフタイム
 
 - 作成・差し替え: `/session` が呼ばれるたびに `SessionSlot.replace()` が走り、直前のセッションは自動破棄される
-- ベース動画の差し替え: `/remove` 完了時に `SessionSlot.swap_base_video()` が走り、旧ベース動画ファイル削除 → 新ベース動画で `init_state` 再構築 → `MaskStore.clear()` を行う
+- ベース動画の差し替え: `/remove` 完了時に `SessionSlot.swap_base_video()` が走り、旧ベース動画ファイル削除 → 新ベース動画で `init_state` 再構築 → MaskStore は旧 Session ごと GC される
 - 明示削除エンドポイントは MVP では設けない（要件上、新規 `/session` で旧セッションが必ず置き換わるため不要）
 - サーバ起動直後はセッションなし（`current() is None`）。`/segment` または `/remove` を呼ばれた場合は 409 を返す
 
@@ -336,10 +336,9 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 2. multipart で受け取った mp4 を一時ファイルに保存
 3. `probe_video()` でメタ情報を取得
 4. `predictor.init_state(video_path=...)` で `inference_state` 構築
-5. `SessionSlot.replace()` で旧セッションを破棄しつつ新規 `Session` をスロットに配置
-6. `mask_store.clear()`、`full_foreground_store.start_loading()`
-7. **バックグラウンドタスク** として全前景抽出を起動（`asyncio.create_task`）。後述 [3.7.4](#374-全前景抽出のバックグラウンド処理)
-8. `videoMeta` を JSON で返す（Pydantic の `alias_generator=to_camel` により snake_case の Python 属性が camelCase に変換される）
+5. `SessionSlot.replace()` で旧セッションを破棄しつつ新規 `Session` をスロットに配置（旧 Session ごと GC で MaskStore / FullForegroundStore も新規になる）
+6. **バックグラウンドタスク** として全前景抽出を起動（`full_foreground_store.submit(work)`。submit が同期で LOADING に遷移してから Task を返すので EMPTY 状態のレースは発生しない）。後述 [3.7.4](#374-全前景抽出のバックグラウンド処理)
+7. `videoMeta` を JSON で返す（Pydantic の `alias_generator=to_camel` により snake_case の Python 属性が camelCase に変換される）
 
 `/session` 自体は全前景抽出の完了を待たない。後続の `/segment` が `full_foreground_store.wait_ready()` で待機する。
 
@@ -377,10 +376,9 @@ mp4 ファイルパスを受けて、`VideoMetadata`（`width / height / fps / n
 6. レスポンスの mp4 バイナリを一時ファイルに書き出す
 7. `probe_video()` でメタ情報を取得
 8. `predictor.init_state(new_base_video_path)` で `inference_state` を再構築
-9. `SessionSlot.swap_base_video(new_base_video_path, new_inference_state, ...)` でベース動画を差し替え。内部で旧 base video を削除する
-10. `MaskStore.clear()` で trimask を破棄
-11. **`full_foreground_store.start_loading()` + バックグラウンドで全前景抽出を再起動**（新しい base video に対する R-CNN + propagate）
-12. 出力 mp4 をバイナリで返す（`video/mp4`）
+9. `SessionSlot.swap_base_video(new_base_video_path, new_inference_state, ...)` でベース動画を差し替え。内部で旧 base video を削除する。MaskStore に残った trimask は次の `/segment` で上書きされるので明示クリアは不要
+10. **`full_foreground_store.submit(work)` でバックグラウンドの全前景抽出を再起動**（新しい base video に対する R-CNN + propagate）
+11. 出力 mp4 をバイナリで返す（`video/mp4`）
 
 > **注**: 同じセッションでベース動画を差し替えるため、フロントエンドからは `/session` を呼び直さない。`/remove` レスポンスがそのまま新しい base video として扱われる。
 >
@@ -396,13 +394,13 @@ flowchart TB
     B --> C["中間フレーム読込: read_frame_at(base_video_path, num_frames//2)"]
     C --> D["Detectron2 で検出 (class-agnostic)<br/>area 降順で上位 DETECTRON2_MAX_DETECTIONS 個"]
     D --> E{検出数}
-    E -- 0 --> F["full_foreground_store.set_ready(object_masks=(0, T, H, W) ndarray)"]
+    E -- 0 --> F["FullForegroundRecord(object_masks=(0, T, H, W) ndarray) を返す → Store が READY に遷移"]
     E -- "1+" --> G["SAM2: 各 mask を add_new_mask + propagate (順方向 + 逆方向)"]
     G --> H["predictor.reset_state (segment 用にクリア)"]
-    H --> I["full_foreground_store.set_ready(object_masks=(N, T, H, W) ndarray)"]
+    H --> I["FullForegroundRecord(object_masks=(N, T, H, W) ndarray) を返す → Store が READY に遷移"]
 ```
 
-失敗時は `full_foreground_store.set_failed(error)` に遷移し、後続の `/segment` は 503 を返す。
+work が例外を上げた場合は Store 内部で FAILED に遷移し、後続の `/segment` は 503 を返す。
 
 `/segment` 側は `wait_ready(timeout=600s)` でこの完了を待つ。バックグラウンド処理が走っている最中に `/segment` が来た場合、自然に待機する。
 
@@ -630,7 +628,6 @@ MVP では自動再起動しない。
 - [ ] `/segment` をセッション未作成で呼ぶと 409 を返す
 - [ ] `/remove` がセッションとマスクの整合性（`base_video_path` 一致）を確認したうえで sidecar の `POST /run` を呼ぶ
 - [ ] `/remove` 完了時に `SessionSlot.swap_base_video()` で旧 base video が削除され、`init_state` が再構築される
-- [ ] `/remove` 完了時に `MaskStore.clear()` が呼ばれる
 - [ ] `/remove` を SAM2 結果なしで呼ぶと 409 (`no segmentation result available`) を返す
 - [ ] sidecar 接続失敗で `/remove` が 503 (`casper sidecar unreachable`) を返す
 - [ ] 一時ファイルがセッション差し替え時に削除される
