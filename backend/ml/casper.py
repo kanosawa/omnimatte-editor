@@ -23,7 +23,7 @@ from typing import Any
 
 import numpy as np
 
-from backend.config import CASPER_STARTUP_TIMEOUT_SEC
+from backend.config import MODEL_STARTUP_TIMEOUT_SEC
 from backend.media.video_io import write_trimask_mp4
 from backend.ml.casper_pipeline import (
     CASPER_TRANSFORMER_PATH,
@@ -268,7 +268,7 @@ async def run_casper(
     一時ファイルは関数内で作成・削除する。`preload_casper` で先回り計算済みなら
     `output_cache` から即返す。
     """
-    await casper.wait_ready(timeout=CASPER_STARTUP_TIMEOUT_SEC)
+    await casper.wait_ready(timeout=MODEL_STARTUP_TIMEOUT_SEC)
 
     fd, trimask_path = tempfile.mkstemp(prefix="casper_trimask_", suffix=".mp4")
     os.close(fd)

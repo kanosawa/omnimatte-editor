@@ -4,7 +4,7 @@ import logging
 import numpy as np
 from fastapi import APIRouter, HTTPException, Response
 
-from backend.config import DETECTRON2_IOU_WITH_TARGET
+from backend.config import DETECTRON2_IOU_WITH_TARGET, MODEL_STARTUP_TIMEOUT_SEC
 from backend.media.video_io import composite_overlay_to_mp4
 from backend.ml.casper import preload_casper
 from backend.ml.sam import sam2
@@ -30,7 +30,7 @@ TRIMASK_KEEP = 255      # 他の前景（残す）
 @router.post("/segment")
 async def segment(req: SegmentRequest) -> Response:
     try:
-        await sam2.wait_ready(timeout=5.0)
+        await sam2.wait_ready(timeout=MODEL_STARTUP_TIMEOUT_SEC)
     except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except RuntimeError as exc:

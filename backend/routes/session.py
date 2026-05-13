@@ -7,6 +7,7 @@ import tempfile
 import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
+from backend.config import MODEL_STARTUP_TIMEOUT_SEC
 from backend.media.video_io import probe_video, read_frame_at
 from backend.ml.detector import detectron2
 from backend.ml.sam import sam2
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 @router.post("/session", response_model=VideoMeta)
 async def start_session(video: UploadFile = File(...)) -> VideoMeta:
     try:
-        await sam2.wait_ready(timeout=5.0)
+        await sam2.wait_ready(timeout=MODEL_STARTUP_TIMEOUT_SEC)
     except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except RuntimeError as exc:
@@ -87,7 +88,7 @@ async def _extract_full_foreground(session: Session) -> None:
     """
     base_video_path = session.base_video_path
     try:
-        await detectron2.wait_ready(timeout=30.0)
+        await detectron2.wait_ready(timeout=MODEL_STARTUP_TIMEOUT_SEC)
 
         # 中間フレームを BGR で取得
         middle_frame_idx = session.num_frames // 2

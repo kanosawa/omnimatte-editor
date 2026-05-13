@@ -5,6 +5,7 @@ import tempfile
 
 from fastapi import APIRouter, HTTPException, Response
 
+from backend.config import MODEL_STARTUP_TIMEOUT_SEC
 from backend.media.video_io import probe_video
 from backend.ml.casper import (
     CasperBusyError,
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 @router.post("/remove")
 async def remove_foreground() -> Response:
     try:
-        await sam2.wait_ready(timeout=5.0)
+        await sam2.wait_ready(timeout=MODEL_STARTUP_TIMEOUT_SEC)
     except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except RuntimeError as exc:
