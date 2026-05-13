@@ -10,7 +10,6 @@
 import asyncio
 import logging
 import threading
-import time
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -31,7 +30,6 @@ class _State(Enum):
 class FullForegroundRecord:
     object_masks: list[np.ndarray]  # 各要素 (T, H, W) bool。検出物体 1 つあたり 1 枚
     base_video_path: str                # マスク生成時点の base video パス（整合性チェック用）
-    created_at: float
 
 
 class FullForegroundStore:
@@ -63,7 +61,6 @@ class FullForegroundStore:
         record = FullForegroundRecord(
             object_masks=object_masks,
             base_video_path=base_video_path,
-            created_at=time.time(),
         )
         with self._lock:
             self._record = record

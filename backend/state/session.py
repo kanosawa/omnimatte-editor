@@ -1,11 +1,14 @@
 import asyncio
 import logging
 import os
-import threading
 from dataclasses import dataclass, field
 
-from backend.state.full_foreground import FullForegroundStore
-from backend.state.mask import MaskStore
+from backend.config import MODEL_STARTUP_TIMEOUT_SEC
+from backend.media.video_io import VideoMetadata, probe_video, read_frame_at
+from backend.ml.detector import detectron2
+from backend.ml.sam import sam2
+from backend.state.stores.full_foreground import FullForegroundStore
+from backend.state.stores.mask import MaskStore
 
 
 logger = logging.getLogger(__name__)
@@ -16,77 +19,115 @@ class Session:
     """1 本の base video に紐づく編集セッション。
 
     Session は自分の派生状態 (`mask_store`, `full_foreground_store`) と
-    バックグラウンドタスクを所有する。`session_slot.install` で新しい Session に
-    差し替えられると、旧 Session は dispose されて GC 対象になる。
+    全前景抽出タスク (`extraction_task`) を所有する。`session_slot.open` で
+    新しい Session に差し替えられると、旧 Session は dispose されて GC 対象になる。
     """
     base_video_path: str
-    width: int
-    height: int
-    fps: float
-    num_frames: int
-    created_at: float
+    meta: VideoMetadata
     mask_store: MaskStore = field(default_factory=MaskStore)
     full_foreground_store: FullForegroundStore = field(default_factory=FullForegroundStore)
-    background_tasks: list[asyncio.Task] = field(default_factory=list)
+    extraction_task: asyncio.Task | None = field(default=None, init=False)
 
-    def add_task(self, task: asyncio.Task) -> None:
-        """このセッションが起動したバックグラウンドタスクを記録する。"""
-        self.background_tasks.append(task)
+    def start_extraction(self) -> None:
+        """全前景抽出をバックグラウンドで起動する。"""
+        self.extraction_task = asyncio.create_task(self._extract_full_foreground())
 
-    async def wait_for_tasks(self) -> None:
-        """記録済みのバックグラウンドタスクの完了を待つ。
+    async def wait_for_extraction(self) -> None:
+        """抽出タスクの完了を待つ。
 
         新セッションへの差し替え前に呼んで、旧 Session の GPU 処理が
-        新 Session と並走しないようにする。タスクの失敗は握り潰す
-        (失敗は各 store に既に記録されているか、誰も読まずに捨てられる)。
+        新 Session と並走しないようにする。タスクの失敗は握り潰す。
         """
-        for task in self.background_tasks:
-            if not task.done():
-                try:
-                    await task
-                except Exception:
-                    pass
+        task = self.extraction_task
+        if task is not None and not task.done():
+            try:
+                await task
+            except Exception:
+                pass
 
     def dispose(self) -> None:
-        """セッション終了時に呼ぶ。base video の tmp ファイルを削除する。
-
-        `mask_store` / `full_foreground_store` / `background_tasks` は
-        Session が GC されると同時に消えるので明示的な破棄は不要。
-        ただし `background_tasks` は事前に `wait_for_tasks()` で
-        完了させておくこと(install 側の責務)。
-        """
         try:
             if self.base_video_path and os.path.exists(self.base_video_path):
                 os.unlink(self.base_video_path)
         except OSError:
             logger.warning("failed to remove video file: %s", self.base_video_path)
 
+    async def _extract_full_foreground(self) -> None:
+        """中間フレームに COCO Mask R-CNN で物体検出 → 各 bbox を SAM で全フレームに propagate。
+        """
+        try:
+            await detectron2.wait_ready(timeout=MODEL_STARTUP_TIMEOUT_SEC)
+
+            # 中間フレームを BGR で取得
+            middle_frame_idx = self.meta.num_frames // 2
+            frame_bgr = await asyncio.to_thread(read_frame_at, self.base_video_path, middle_frame_idx)
+
+            # Detectron2 で物体検出（class-agnostic、bbox のみ）
+            detected_bboxes = await asyncio.to_thread(detectron2.detect, frame_bgr)
+            logger.info("R-CNN detected %d objects on frame %d", len(detected_bboxes), middle_frame_idx)
+
+            # 検出が 0 のときは SAM propagate を skip
+            if detected_bboxes:
+                object_masks = await asyncio.to_thread(
+                    sam2.segment_from_bboxes,
+                    detected_bboxes,
+                    keyframe_idx=middle_frame_idx,
+                )
+            else:
+                object_masks = []
+
+            self.full_foreground_store.set_ready(
+                object_masks=object_masks,
+                base_video_path=self.base_video_path,
+            )
+            logger.info("full foreground extraction complete: %d objects", len(object_masks))
+        except Exception as exc:
+            logger.exception("full foreground extraction failed")
+            self.full_foreground_store.set_failed(str(exc))
+
 
 class SessionSlot:
     """常に最大 1 件のセッションだけを保持するスロット。
 
-    `install` で新しい session を登録すると、旧 session は `dispose` で破棄される。
+    `open` で新しい video のセッションを active にすると、旧セッションは破棄される。
     """
 
     def __init__(self) -> None:
         self._current: Session | None = None
-        self._lock = threading.Lock()
-
-    def install(self, session: Session) -> None:
-        """新しい session を登録。旧 session は dispose される。
-
-        旧 session の background_tasks の完了は呼び出し側で `wait_for_tasks()`
-        を await してから install すること。
-        """
-        with self._lock:
-            old = self._current
-            self._current = session
-        if old is not None and old.base_video_path != session.base_video_path:
-            old.dispose()
 
     def current(self) -> Session | None:
-        with self._lock:
-            return self._current
+        return self._current
+
+    async def open(self, video_path: str) -> Session:
+        """新しい video のセッションを作って active にする。旧セッションは破棄。
+        """
+        meta = probe_video(video_path)
+        old = self.current()
+        if old is not None:
+            await old.wait_for_extraction()
+        sam2.open_session(video_path=video_path)
+        session = Session(
+            base_video_path=video_path,
+            meta=meta,
+        )
+        session.full_foreground_store.start_loading()
+        self._install(session)
+        session.start_extraction()
+        return session
+
+    def _install(self, session: Session) -> None:
+        """slot に session を登録し、旧 session を dispose する。`open` の内部実装。"""
+        old = self._current
+        if old is not None:
+            task = old.extraction_task
+            if task is not None and not task.done():
+                raise RuntimeError(
+                    "_install called before old session's extraction completed; "
+                    "await old.wait_for_extraction() first"
+                )
+        self._current = session
+        if old is not None and old.base_video_path != session.base_video_path:
+            old.dispose()
 
 
 session_slot = SessionSlot()

@@ -38,17 +38,17 @@ async def segment(req: SegmentRequest) -> Response:
     if session is None:
         raise HTTPException(status_code=409, detail="no active session")
 
-    if req.frame_idx >= session.num_frames:
+    if req.frame_idx >= session.meta.num_frames:
         raise HTTPException(
             status_code=422,
-            detail=f"frame_idx out of range: {req.frame_idx} >= {session.num_frames}",
+            detail=f"frame_idx out of range: {req.frame_idx} >= {session.meta.num_frames}",
         )
 
     # 診断用: 受け取ったパラメータと base video のパスをログに出す。
     # これを scripts/sam2_diagnose.py に同じ値で渡せば、実験コードパスでの結果と直接比較できる。
     logger.info(
         "segment request: frame_idx=%d bbox=%s session=(%dx%d) num_frames=%d base_video=%s",
-        req.frame_idx, req.bbox, session.width, session.height, session.num_frames,
+        req.frame_idx, req.bbox, session.meta.width, session.meta.height, session.meta.num_frames,
         session.base_video_path,
     )
 
@@ -106,7 +106,7 @@ async def segment(req: SegmentRequest) -> Response:
     trimask[other_fg_combined & ~masks_target] = TRIMASK_KEEP
     trimask[masks_target] = TRIMASK_REMOVE
 
-    fps = session.fps
+    fps = session.meta.fps
     try:
         mp4_bytes = composite_overlay_to_mp4(
             original_video_path=session.base_video_path,
@@ -132,8 +132,8 @@ async def segment(req: SegmentRequest) -> Response:
             base_video_path=session.base_video_path,
             trimask=trimask,
             fps=fps,
-            width=session.width,
-            height=session.height,
+            width=session.meta.width,
+            height=session.meta.height,
         )
     )
 

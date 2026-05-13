@@ -1,5 +1,4 @@
 import threading
-import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -17,7 +16,6 @@ class MaskRecord:
     trimask: np.ndarray
     base_video_path: str           # マスク生成時点の base video パス（整合性チェック用）
     fps: float                     # マスク生成時点の fps
-    created_at: float
 
 
 class MaskStore:
@@ -37,7 +35,6 @@ class MaskStore:
             trimask=trimask,
             base_video_path=base_video_path,
             fps=fps,
-            created_at=time.time(),
         )
         with self._lock:
             self._current = record

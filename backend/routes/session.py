@@ -1,18 +1,14 @@
-import asyncio
 import logging
 import os
 import shutil
 import tempfile
-import time
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from backend.config import MODEL_STARTUP_TIMEOUT_SEC
-from backend.media.video_io import probe_video, read_frame_at
-from backend.ml.detector import detectron2
 from backend.ml.sam import sam2
 from backend.schemas import VideoMeta
-from backend.state.session import Session, session_slot
+from backend.state.session import session_slot
 
 
 router = APIRouter()
@@ -28,12 +24,6 @@ async def start_session(video: UploadFile = File(...)) -> VideoMeta:
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
-    # 旧 session のバックグラウンド抽出が走っていれば完了を待つ
-    # (新 session の GPU 処理と並走しないようにする)
-    old_session = session_slot.current()
-    if old_session is not None:
-        await old_session.wait_for_tasks()
-
     suffix = os.path.splitext(video.filename or "")[1] or ".mp4"
     fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     os.close(fd)
@@ -43,27 +33,9 @@ async def start_session(video: UploadFile = File(...)) -> VideoMeta:
             shutil.copyfileobj(video.file, out)
 
         try:
-            meta = probe_video(tmp_path)
+            session = await session_slot.open(tmp_path)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-
-        sam2.open_session(video_path=tmp_path)
-
-        session = Session(
-            base_video_path=tmp_path,
-            width=meta.width,
-            height=meta.height,
-            fps=meta.fps,
-            num_frames=meta.num_frames,
-            created_at=time.time(),
-        )
-        # 全前景抽出を起動することを示す状態にしてから publish
-        session.full_foreground_store.start_loading()
-        session_slot.install(session)
-
-        # 全前景抽出（R-CNN + SAM propagate）はバックグラウンドで実行。
-        # `/session` は即時 VideoMeta を返し、`/segment` 側で wait_ready する。
-        schedule_extraction(session)
     except HTTPException:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -75,58 +47,9 @@ async def start_session(video: UploadFile = File(...)) -> VideoMeta:
         raise HTTPException(status_code=500, detail="failed to create session")
 
     return VideoMeta(
-        width=session.width,
-        height=session.height,
-        fps=session.fps,
-        num_frames=session.num_frames,
-        duration_sec=session.num_frames / session.fps if session.fps > 0 else 0.0,
+        width=session.meta.width,
+        height=session.meta.height,
+        fps=session.meta.fps,
+        num_frames=session.meta.num_frames,
+        duration_sec=session.meta.duration_sec,
     )
-
-
-def schedule_extraction(session: Session) -> None:
-    """セッションの全前景抽出をバックグラウンドで起動し、
-    `session.background_tasks` に登録する。
-    """
-    task = asyncio.create_task(_extract_full_foreground(session))
-    session.add_task(task)
-
-
-async def _extract_full_foreground(session: Session) -> None:
-    """中間フレームに COCO Mask R-CNN で物体検出 → 各 bbox を SAM で全フレームに propagate。
-
-    結果を `session.full_foreground_store` に保存する。`/session` 完了後に
-    バックグラウンドで実行される。SAM2 のセッション状態（`sam2._state`）を共有して
-    使うが、`sam2.segment_from_bboxes` が終了時に reset するので、後続の
-    `/segment` は通常通り使える。
-    """
-    base_video_path = session.base_video_path
-    try:
-        await detectron2.wait_ready(timeout=MODEL_STARTUP_TIMEOUT_SEC)
-
-        # 中間フレームを BGR で取得
-        middle_frame_idx = session.num_frames // 2
-        frame_bgr = await asyncio.to_thread(read_frame_at, base_video_path, middle_frame_idx)
-
-        # Detectron2 で物体検出（class-agnostic、bbox のみ）
-        detected_bboxes = await asyncio.to_thread(detectron2.detect, frame_bgr)
-        logger.info("R-CNN detected %d objects on frame %d", len(detected_bboxes), middle_frame_idx)
-
-        # 検出 0 のときも空リストを保持して ready 状態に遷移
-        if not detected_bboxes:
-            session.full_foreground_store.set_ready(object_masks=[], base_video_path=base_video_path)
-            return
-
-        # SAM video propagate を別 thread で実行
-        object_masks = await asyncio.to_thread(
-            sam2.segment_from_bboxes,
-            detected_bboxes,
-            keyframe_idx=middle_frame_idx,
-        )
-        session.full_foreground_store.set_ready(
-            object_masks=object_masks,
-            base_video_path=base_video_path,
-        )
-        logger.info("full foreground extraction complete: %d objects", len(object_masks))
-    except Exception as exc:
-        logger.exception("full foreground extraction failed")
-        session.full_foreground_store.set_failed(str(exc))
