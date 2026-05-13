@@ -19,7 +19,7 @@ import shutil
 import tempfile
 import threading
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 
@@ -60,24 +60,16 @@ class CasperRunError(Exception):
 # ロード状態管理
 # ============================================================================
 
-CasperState = Literal["loading", "ready", "failed"]
-
-
 class Casper:
     """Casper パイプラインのロード状態管理。"""
 
     def __init__(self) -> None:
-        self._state: CasperState = "loading"
         self._pipeline: Any = None
         self._vae: Any = None
         self._generator: Any = None
         self._cfg: Any = None
         self._error: str | None = None
         self._ready_event = asyncio.Event()
-
-    @property
-    def state(self) -> CasperState:
-        return self._state
 
     @property
     def pipeline(self) -> Any:
@@ -95,9 +87,9 @@ class Casper:
     def cfg(self) -> Any:
         return self._cfg
 
-    @property
-    def error(self) -> str | None:
-        return self._error
+    def is_ready(self) -> bool:
+        """ロードが完了し、かつ失敗していないか。`preload_casper` の早期 return 用。"""
+        return self._ready_event.is_set() and self._error is None
 
     def _load_sync(self):
         if not os.path.exists(CASPER_TRANSFORMER_PATH):
@@ -115,24 +107,22 @@ class Casper:
             self._pipeline = pipeline
             self._vae = vae
             self._generator = generator
-            self._state = "ready"
             logger.info("casper pipeline loaded")
         except Exception as exc:
             logger.exception("casper pipeline load failed")
             self._error = str(exc)
-            self._state = "failed"
         self._ready_event.set()
 
     async def wait_ready(self, timeout: float | None = None) -> None:
-        if self._state == "ready":
+        if self._ready_event.is_set():
+            if self._error is not None:
+                raise CasperNotReadyError(f"casper failed to load: {self._error}")
             return
-        if self._state == "failed":
-            raise CasperNotReadyError(f"casper failed to load: {self._error}")
         try:
             await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise CasperNotReadyError("casper not ready (timeout)") from exc
-        if self._state == "failed":
+        if self._error is not None:
             raise CasperNotReadyError(f"casper failed to load: {self._error}")
 
 
@@ -350,8 +340,8 @@ async def preload_casper(
     ヒットを狙う。失敗しても例外を投げず、ログだけ残す。
     """
     # casper が ready でないなら何もしない（後で run_casper が来たときに動く）
-    if casper.state != "ready":
-        logger.info("preload skipped: casper_state=%s", casper.state)
+    if not casper.is_ready():
+        logger.info("preload skipped: casper not ready")
         return
 
     fd, trimask_path = tempfile.mkstemp(prefix="casper_preload_trimask_", suffix=".mp4")

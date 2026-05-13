@@ -12,7 +12,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Literal
+from enum import Enum, auto
 
 import numpy as np
 
@@ -20,7 +20,11 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-FullFgState = Literal["empty", "loading", "ready", "failed"]
+class _State(Enum):
+    EMPTY = auto()    # 未開始（初期状態 / clear 後）
+    LOADING = auto()  # start_loading 済み、完了待ち
+    READY = auto()    # set_ready で完了
+    FAILED = auto()   # set_failed で失敗
 
 
 @dataclass
@@ -38,21 +42,16 @@ class FullForegroundStore:
     """
 
     def __init__(self) -> None:
-        self._state: FullFgState = "empty"
+        self._state: _State = _State.EMPTY
         self._record: FullForegroundRecord | None = None
         self._error: str | None = None
         self._ready_event: asyncio.Event = asyncio.Event()
         self._lock = threading.Lock()
 
-    @property
-    def state(self) -> FullFgState:
-        with self._lock:
-            return self._state
-
     def start_loading(self) -> None:
         """`/session` 開始時に呼ぶ。スロットを loading 状態に初期化"""
         with self._lock:
-            self._state = "loading"
+            self._state = _State.LOADING
             self._record = None
             self._error = None
         # asyncio.Event は loop に紐づくので新規作成
@@ -66,18 +65,18 @@ class FullForegroundStore:
         )
         with self._lock:
             self._record = record
-            self._state = "ready"
+            self._state = _State.READY
         self._ready_event.set()
 
     def set_failed(self, error: str) -> None:
         with self._lock:
             self._error = error
-            self._state = "failed"
+            self._state = _State.FAILED
         self._ready_event.set()
 
     def clear(self) -> None:
         with self._lock:
-            self._state = "empty"
+            self._state = _State.EMPTY
             self._record = None
             self._error = None
         self._ready_event = asyncio.Event()
@@ -90,11 +89,11 @@ class FullForegroundStore:
         with self._lock:
             state = self._state
             error = self._error
-        if state == "ready":
+        if state is _State.READY:
             return
-        if state == "failed":
+        if state is _State.FAILED:
             raise RuntimeError(f"full foreground extraction failed: {error}")
-        if state == "empty":
+        if state is _State.EMPTY:
             raise RuntimeError("no full foreground extraction in progress")
         try:
             await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
@@ -103,7 +102,7 @@ class FullForegroundStore:
         with self._lock:
             state = self._state
             error = self._error
-        if state == "failed":
+        if state is _State.FAILED:
             raise RuntimeError(f"full foreground extraction failed: {error}")
 
 

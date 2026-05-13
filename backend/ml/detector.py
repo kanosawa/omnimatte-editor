@@ -1,12 +1,10 @@
 """Detectron2 (COCO Mask R-CNN) を class-agnostic で使う物体検出ホルダ。
 
-クラスラベルは無視し、インスタンスマスクのみを返す。SAM2 への propagation 用に
-中間フレームでの 1 ショット推論で使う。
+クラスラベルは無視し、インスタンスマスクのみを返す。
+SAM2 への propagation 用に中間フレームでの 1 ショット推論で利用する。
 """
 import asyncio
 import logging
-from typing import Literal
-
 import numpy as np
 
 from backend.config import (
@@ -18,34 +16,16 @@ from backend.config import (
 
 logger = logging.getLogger(__name__)
 
-
-# detectron2 model_zoo 内の固定 config 名。モデル選定そのものに紐づくため定数扱い。
 DETECTRON2_CONFIG = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
-
-
-DetectorState = Literal["loading", "ready", "failed"]
 
 
 class Detectron2:
     """Detectron2 の DefaultPredictor をプリロードして保持する。"""
 
     def __init__(self) -> None:
-        self._state: DetectorState = "loading"
         self._predictor = None
         self._error: str | None = None
         self._ready_event = asyncio.Event()
-
-    @property
-    def state(self) -> DetectorState:
-        return self._state
-
-    @property
-    def predictor(self):
-        return self._predictor
-
-    @property
-    def error(self) -> str | None:
-        return self._error
 
     def _load_sync(self):
         from detectron2 import model_zoo
@@ -65,23 +45,21 @@ class Detectron2:
     async def load(self) -> None:
         try:
             self._predictor = await asyncio.to_thread(self._load_sync)
-            self._state = "ready"
         except Exception as exc:
             logger.exception("Detectron2 load failed")
             self._error = str(exc)
-            self._state = "failed"
         self._ready_event.set()
 
     async def wait_ready(self, timeout: float | None = None) -> None:
-        if self._state == "ready":
+        if self._ready_event.is_set():
+            if self._error is not None:
+                raise RuntimeError(f"detector failed to load: {self._error}")
             return
-        if self._state == "failed":
-            raise RuntimeError(f"detector failed to load: {self._error}")
         try:
             await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise TimeoutError("detector not ready (timeout)") from exc
-        if self._state == "failed":
+        if self._error is not None:
             raise RuntimeError(f"detector failed to load: {self._error}")
 
     def detect(self, frame_bgr: np.ndarray) -> list[np.ndarray]:

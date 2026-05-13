@@ -127,10 +127,17 @@ stateDiagram-v2
 
 backend は以下を保持する。
 
-- `state`: `"loading" | "ready" | "failed"`
 - `_predictor`: ラップ対象の `Sam2VideoPredictor`
-- `error`: ロード失敗時のエラーメッセージ
+- `_error`: ロード失敗時のエラーメッセージ（成功時は `None`）
 - `_ready_event`: `asyncio.Event`（ロード完了シグナル）
+
+3 状態（loading / ready / failed）は別フィールドで持たず、上記 2 つから導出する：
+
+- loading: `not _ready_event.is_set()`
+- ready: `_ready_event.is_set() and _error is None`
+- failed: `_ready_event.is_set() and _error is not None`
+
+「同じ事実を 2 ヶ所で同期させる」典型バグを避け、文字列リテラルでの状態管理由来のタイポリスクも除去している。
 
 `threading.Lock` は使わない。ロード完了時の状態更新はイベントループ上で行うため、複数スレッドから同時アクセスされない。
 
@@ -145,11 +152,11 @@ async def lifespan(app: FastAPI):
     yield
 ```
 
-`load()` 内では `asyncio.to_thread(self._load_sync)` を使い、SAM のブロッキング初期化処理を worker thread に逃がしながら、状態更新（`_state` 設定や `_ready_event.set()`）はイベントループ上で安全に行う。
+`load()` 内では `asyncio.to_thread(self._load_sync)` を使い、SAM のブロッキング初期化処理を worker thread に逃がしながら、状態更新（`_error` 設定と `_ready_event.set()`）はイベントループ上で安全に行う。
 
-- 起動直後は `state = "loading"`。サーバはすぐにリクエストを受け付ける
-- ロード完了で `state = "ready"`、`_ready_event.set()`
-- ロード失敗で `state = "failed"`、`error` にメッセージ、`_ready_event.set()`
+- 起動直後は `_ready_event` がクリア状態（= loading）。サーバはすぐにリクエストを受け付ける
+- ロード成功時: `_ready_event.set()`（`_error` は `None` のまま）→ ready
+- ロード失敗時: `_error` にメッセージ、`_ready_event.set()` → failed
 
 ### 3.4.5 リクエスト処理時のロード待ち合わせ
 
@@ -157,16 +164,16 @@ async def lifespan(app: FastAPI):
 
 ```python
 async def wait_ready(self, timeout: float | None = None) -> None:
-    if self._state == "ready":
+    if self._ready_event.is_set():
+        if self._error is not None:
+            raise RuntimeError(f"model failed to load: {self._error}")
         return
-    if self._state == "failed":
-        raise RuntimeError(f"model failed to load: {self._error}")
     try:
         await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
     except asyncio.TimeoutError as exc:
         raise TimeoutError("model not ready (timeout)") from exc
-    if self._state == "failed":
-        raise RuntimeError(...)
+    if self._error is not None:
+        raise RuntimeError(f"model failed to load: {self._error}")
 ```
 
 ハンドラ側では `TimeoutError` / `RuntimeError` を 503 に変換。タイムアウトはハードコードで 5.0 秒（[04-api.md §4.7](04-api.md#47-タイムアウト方針)）。

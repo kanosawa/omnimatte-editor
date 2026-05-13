@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Iterator, Literal
+from typing import Any, Iterator
 
 import numpy as np
 import torch
@@ -30,9 +30,6 @@ SAM2_CFG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 SAM2_CKPT = os.path.join(_BACKEND_DIR, "models", "sam2", "sam2.1_hiera_large.pt")
 
 
-SamState = Literal["loading", "ready", "failed"]
-
-
 PropagateItem = tuple[int, list[int], list[np.ndarray]]
 """propagate() の yield 単位。
 
@@ -44,18 +41,9 @@ PropagateItem = tuple[int, list[int], list[np.ndarray]]
 
 class Sam2:
     def __init__(self) -> None:
-        self._state: SamState = "loading"
         self._predictor = None
         self._error: str | None = None
         self._ready_event = asyncio.Event()
-
-    @property
-    def state(self) -> SamState:
-        return self._state
-
-    @property
-    def error(self) -> str | None:
-        return self._error
 
     def _load_sync(self):
         from sam2.build_sam import build_sam2_video_predictor
@@ -71,23 +59,21 @@ class Sam2:
     async def load(self) -> None:
         try:
             self._predictor = await asyncio.to_thread(self._load_sync)
-            self._state = "ready"
         except Exception as exc:
             logger.exception("SAM2 model load failed")
             self._error = str(exc)
-            self._state = "failed"
         self._ready_event.set()
 
     async def wait_ready(self, timeout: float | None = None) -> None:
-        if self._state == "ready":
+        if self._ready_event.is_set():
+            if self._error is not None:
+                raise RuntimeError(f"model failed to load: {self._error}")
             return
-        if self._state == "failed":
-            raise RuntimeError(f"model failed to load: {self._error}")
         try:
             await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise TimeoutError("model not ready (timeout)") from exc
-        if self._state == "failed":
+        if self._error is not None:
             raise RuntimeError(f"model failed to load: {self._error}")
 
     # ---------- セッション ----------
