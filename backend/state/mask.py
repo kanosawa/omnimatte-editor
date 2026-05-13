@@ -21,11 +21,11 @@ class MaskRecord:
 
 
 class MaskStore:
-    """直近 1 件の trimask を保持する単一スロット。
+    """per-session スロット。`Session` が 1 個ずつ所有する。
 
-    `/segment` 完了時に `set` で上書きし、`/remove` 成功時 / `/session`
-    差し替え時に `clear` する。`/remove` の入力に使うため、サーバ側に
-    保持してフロント⇔サーバ間でマスクを往復させない。
+    `/segment` 完了時に `set` で trimask を入れ、`/remove` で読み出す。
+    新しい `/session` / `/remove` 時には旧 Session ごと GC されるので、
+    明示的な clear は不要（メソッドは API として残してある）。
     """
 
     def __init__(self) -> None:
@@ -50,6 +50,3 @@ class MaskStore:
     def clear(self) -> None:
         with self._lock:
             self._current = None
-
-
-mask_store = MaskStore()

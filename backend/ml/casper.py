@@ -52,10 +52,6 @@ class CasperNotReadyError(Exception):
     """Casper モデルがロード中 / 失敗で呼べない状態。`/remove` で 503 にマップ。"""
 
 
-class CasperBusyError(Exception):
-    """別の Casper 推論が進行中で `run_lock` が取れない（409）。現状は raise しない。"""
-
-
 class CasperRunError(Exception):
     """Casper 推論パイプライン内で例外が発生（500）。"""
 
@@ -68,28 +64,12 @@ class Casper:
     """Casper パイプラインのロード状態管理。"""
 
     def __init__(self) -> None:
-        self._pipeline: Any = None
-        self._vae: Any = None
-        self._generator: Any = None
-        self._cfg: Any = None
+        self.pipeline: Any = None
+        self.vae: Any = None
+        self.generator: Any = None
+        self.cfg: Any = None
         self._error: str | None = None
         self._ready_event = asyncio.Event()
-
-    @property
-    def pipeline(self) -> Any:
-        return self._pipeline
-
-    @property
-    def vae(self) -> Any:
-        return self._vae
-
-    @property
-    def generator(self) -> Any:
-        return self._generator
-
-    @property
-    def cfg(self) -> Any:
-        return self._cfg
 
     def is_ready(self) -> bool:
         """ロードが完了し、かつ失敗していないか。`preload_casper` の早期 return 用。"""
@@ -107,10 +87,10 @@ class Casper:
     async def load(self) -> None:
         try:
             cfg, pipeline, vae, generator = await asyncio.to_thread(self._load_sync)
-            self._cfg = cfg
-            self._pipeline = pipeline
-            self._vae = vae
-            self._generator = generator
+            self.cfg = cfg
+            self.pipeline = pipeline
+            self.vae = vae
+            self.generator = generator
             logger.info("casper pipeline loaded")
         except Exception as exc:
             logger.exception("casper pipeline load failed")
@@ -200,7 +180,7 @@ def _do_pipeline_run(
     )
 
     work_root = tempfile.mkdtemp(prefix="casper_pipe_")
-    seq_name = f"seq_{os.path.basename(work_root).split('_', 2)[-1]}"
+    seq_name = "seq"
     seq_dir = os.path.join(work_root, "data", seq_name)
     save_dir = os.path.join(work_root, "out")
     os.makedirs(seq_dir, exist_ok=True)
@@ -230,6 +210,39 @@ def _do_pipeline_run(
         shutil.rmtree(work_root, ignore_errors=True)
 
 
+async def _execute(
+    base_video_path: str,
+    trimask: np.ndarray,
+    fps: float,
+    width: int,
+    height: int,
+) -> bytes:
+    """trimask を tempfile に書き出して `_do_pipeline_run` を回す共通ヘルパ。
+
+    `run_lock` 取得と一時ファイル管理を担当する。例外はそのまま伝播するので、
+    呼び出し側で受け止めて HTTP / Future にマップすること。
+    """
+    fd, trimask_path = tempfile.mkstemp(prefix="casper_trimask_", suffix=".mp4")
+    os.close(fd)
+    try:
+        write_trimask_mp4(trimask=trimask, fps=fps, out_path=trimask_path)
+        async with run_lock:
+            return await asyncio.to_thread(
+                _do_pipeline_run,
+                base_video_path,
+                trimask_path,
+                width,
+                height,
+                fps,
+                CASPER_DEFAULT_PROMPT,
+            )
+    finally:
+        try:
+            os.unlink(trimask_path)
+        except OSError:
+            pass
+
+
 # ============================================================================
 # 高レベル API（routes から呼ばれる）
 # ============================================================================
@@ -248,8 +261,7 @@ async def run_casper(
 
     `preload_casper` が同じ trimask ndarray で先回り中・完了済みなら
     そちらの結果（Future）を再利用する。一致しない・preload が失敗していた
-    場合は `run_lock` を取って pipeline をその場で回す。一時ファイルは
-    関数内で作成・削除する。
+    場合はその場で pipeline を回す。
     """
     await casper.wait_ready(timeout=MODEL_STARTUP_TIMEOUT_SEC)
 
@@ -257,38 +269,19 @@ async def run_casper(
     if pending is not None and pending.trimask is trimask:
         try:
             mp4_bytes = await pending.future
-            logger.info("preload HIT, returning %d bytes", len(mp4_bytes))
+            logger.info("[run] preload HIT: returning %d bytes", len(mp4_bytes))
             return mp4_bytes
         except Exception:
-            logger.warning("preload failed; falling back to fresh run")
+            logger.warning("[run] preload failed; falling back to fresh run")
 
-    fd, trimask_path = tempfile.mkstemp(prefix="casper_trimask_", suffix=".mp4")
-    os.close(fd)
+    logger.info("[run] preload MISS: running pipeline")
     try:
-        write_trimask_mp4(trimask=trimask, fps=fps, out_path=trimask_path)
-        async with run_lock:
-            logger.info("preload MISS, running pipeline")
-            try:
-                mp4_bytes = await asyncio.to_thread(
-                    _do_pipeline_run,
-                    base_video_path,
-                    trimask_path,
-                    width,
-                    height,
-                    fps,
-                    CASPER_DEFAULT_PROMPT,
-                )
-            except ValueError as exc:
-                raise CasperRunError(str(exc)) from exc
-            except Exception as exc:
-                logger.exception("casper run failed")
-                raise CasperRunError(f"casper run failed: {exc}") from exc
-            return mp4_bytes
-    finally:
-        try:
-            os.unlink(trimask_path)
-        except OSError:
-            pass
+        return await _execute(base_video_path, trimask, fps, width, height)
+    except ValueError as exc:
+        raise CasperRunError(str(exc)) from exc
+    except Exception as exc:
+        logger.exception("[run] pipeline failed")
+        raise CasperRunError(f"casper run failed: {exc}") from exc
 
 
 async def preload_casper(
@@ -306,45 +299,18 @@ async def preload_casper(
     失敗時は Future に例外をセットし、`run_casper` 側でフォールバックさせる。
     """
     if not casper.is_ready():
-        logger.info("preload skipped: casper not ready")
+        logger.info("[preload] skipped: casper not ready")
         return
 
     global _preload
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future = loop.create_future()
+    future: asyncio.Future = asyncio.get_running_loop().create_future()
     _preload = PendingPreload(trimask=trimask, future=future)
 
-    fd, trimask_path = tempfile.mkstemp(prefix="casper_preload_trimask_", suffix=".mp4")
-    os.close(fd)
+    logger.info("[preload] starting pipeline")
     try:
-        try:
-            write_trimask_mp4(trimask=trimask, fps=fps, out_path=trimask_path)
-        except Exception as exc:
-            logger.exception("preload: trimask mp4 write failed")
-            future.set_exception(exc)
-            return
-
-        async with run_lock:
-            logger.info("preload starting pipeline")
-            try:
-                mp4_bytes = await asyncio.to_thread(
-                    _do_pipeline_run,
-                    base_video_path,
-                    trimask_path,
-                    width,
-                    height,
-                    fps,
-                    CASPER_DEFAULT_PROMPT,
-                )
-            except Exception as exc:
-                logger.exception("preload pipeline failed (silently swallowed)")
-                future.set_exception(exc)
-                return
-
-            future.set_result(mp4_bytes)
-            logger.info("preload complete: %d bytes", len(mp4_bytes))
-    finally:
-        try:
-            os.unlink(trimask_path)
-        except OSError:
-            pass
+        mp4_bytes = await _execute(base_video_path, trimask, fps, width, height)
+        future.set_result(mp4_bytes)
+        logger.info("[preload] complete: %d bytes", len(mp4_bytes))
+    except Exception as exc:
+        logger.exception("[preload] failed")
+        future.set_exception(exc)

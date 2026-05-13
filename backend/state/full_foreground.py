@@ -35,10 +35,12 @@ class FullForegroundRecord:
 
 
 class FullForegroundStore:
-    """単一スロット。`/session` 開始で `start_loading` → 完了で `set_ready` / `set_failed`。
+    """per-session スロット。`Session` が 1 個ずつ所有する。
 
-    `/segment` は `wait_ready` で完了を待ってから読み出す。次の `/session` または
-    `/remove` 完了で `clear` される。
+    `/session` 開始で `start_loading` → 完了で `set_ready` / `set_failed`。
+    `/segment` は `wait_ready` で完了を待ってから読み出す。新しい `/session` /
+    `/remove` 時には旧 Session ごと GC されるので、明示的な clear は不要
+    （メソッドは API として残してある）。
     """
 
     def __init__(self) -> None:
@@ -104,6 +106,3 @@ class FullForegroundStore:
             error = self._error
         if state is _State.FAILED:
             raise RuntimeError(f"full foreground extraction failed: {error}")
-
-
-full_foreground_store = FullForegroundStore()

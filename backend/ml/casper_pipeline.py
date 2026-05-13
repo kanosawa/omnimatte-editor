@@ -14,10 +14,11 @@
 import logging
 import os
 import sys
-import uuid
 
 import numpy as np
 import torch
+
+from backend.media.video_io import probe_video
 
 
 logger = logging.getLogger(__name__)
@@ -109,13 +110,11 @@ def run_one_seq(
         if video_length != 1 else 1
     )
 
-    keep_fg_ids = [-1]  # all_fg
-
     # get_video_mask_input は内部で os.path.join(data_rootdir, input_video_name, ...) を組む
     input_video, input_video_mask, prompt, clip_image = get_video_mask_input(
         seq_name,
         sample_size=sample_size,
-        keep_fg_ids=keep_fg_ids,
+        keep_fg_ids=[-1],  # all_fg
         max_video_length=video_length,
         temporal_window_size=cfg.video_model.temporal_window_size,
         data_rootdir=data_rootdir,
@@ -144,8 +143,8 @@ def run_one_seq(
     # 末尾を reflection padding しているため、sample にも余分なフレームが含まれる
     # （例: 43 → 45 にパディング）。元動画のフレーム数に切り詰めて、再生時に
     # 末尾が「巻き戻し」のように見える現象を防ぐ。
-    n_original = _get_video_frame_count(os.path.join(seq_dir, "input_video.mp4"))
-    if n_original > 0 and sample.shape[2] > n_original:
+    n_original = probe_video(os.path.join(seq_dir, "input_video.mp4")).num_frames
+    if sample.shape[2] > n_original:
         logger.info(
             "trimming Casper output: %d -> %d frames (drop temporal padding)",
             sample.shape[2], n_original,
@@ -153,20 +152,18 @@ def run_one_seq(
         sample = sample[:, :, :n_original]
 
     os.makedirs(save_dir, exist_ok=True)
-
-    save_video_name = f"{seq_name}-fg=" + "_".join([f"{i:02d}" for i in keep_fg_ids])
-    prefix = save_video_name + f"-{uuid.uuid4().hex[:8]}"
-    video_path = os.path.join(save_dir, prefix + ".mp4")
-
-    _save_video_high_quality(sample, video_path, fps=fps)
+    video_path = os.path.join(save_dir, "output.mp4")
+    _save_video_mp4(sample, video_path, fps=fps)
     return video_path
 
 
-def _tensor_to_uint8_rgb_frames(sample) -> list[np.ndarray]:
-    """`(B, C, T, H, W)` のテンソル（[0, 1]）を `(H, W, 3)` uint8 RGB フレーム列に変換。
+def _save_video_mp4(sample, path: str, fps: float) -> None:
+    """`(B, C, T, H, W)` の [0, 1] テンソルを H.264 / yuv420p / crf 15 の mp4 に書き出す。
 
-    `videox_fun.utils.utils.save_videos_grid` のテンソル変換ロジックを抜き出したもの。
+    `videox_fun.utils.utils.save_videos_grid` のテンソル変換ロジックを抜き出して
+    imageio の書き出しと一体化したもの。
     """
+    import imageio
     import torchvision
     from einops import rearrange
     from PIL import Image
@@ -178,12 +175,6 @@ def _tensor_to_uint8_rgb_frames(sample) -> list[np.ndarray]:
         x = x.transpose(0, 1).transpose(1, 2).squeeze(-1)
         x = (x * 255).numpy().astype(np.uint8)
         frames.append(np.array(Image.fromarray(x)))
-    return frames
-
-
-def _save_uint8_frames_high_quality(frames, path: str, fps: float) -> None:
-    """RGB uint8 フレーム列を H.264 / yuv420p / crf 15 で mp4 に書き出す。"""
-    import imageio
 
     imageio.mimsave(
         path,
@@ -198,22 +189,3 @@ def _save_uint8_frames_high_quality(frames, path: str, fps: float) -> None:
             "-pix_fmt", "yuv420p", # 互換性確保
         ],
     )
-
-
-def _save_video_high_quality(sample, path: str, fps: float) -> None:
-    """`(B, C, T, H, W)` のテンソル（[0, 1]）を高品質 mp4 に書き出す。"""
-    frames = _tensor_to_uint8_rgb_frames(sample)
-    _save_uint8_frames_high_quality(frames, path, fps)
-
-
-def _get_video_frame_count(path: str) -> int:
-    """mp4 のフレーム数を返す（OpenCV で probe）。失敗時は 0。"""
-    import cv2
-
-    cap = cv2.VideoCapture(path)
-    if not cap.isOpened():
-        return 0
-    try:
-        return int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    finally:
-        cap.release()

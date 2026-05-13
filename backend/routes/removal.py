@@ -1,22 +1,19 @@
-import asyncio
 import logging
 import os
 import tempfile
+import time
 
 from fastapi import APIRouter, HTTPException, Response
 
 from backend.config import MODEL_STARTUP_TIMEOUT_SEC
 from backend.media.video_io import probe_video
 from backend.ml.casper import (
-    CasperBusyError,
     CasperNotReadyError,
     CasperRunError,
     run_casper,
 )
 from backend.ml.sam import sam2
-from backend.stores.full_foreground_store import full_foreground_store
-from backend.stores.mask_store import mask_store
-from backend.stores.session import session_slot
+from backend.state.session import Session, session_slot
 
 
 router = APIRouter()
@@ -36,7 +33,7 @@ async def remove_foreground() -> Response:
     if session is None:
         raise HTTPException(status_code=409, detail="no active session")
 
-    record = mask_store.current()
+    record = session.mask_store.current()
     if record is None:
         raise HTTPException(status_code=409, detail="no segmentation result available")
 
@@ -57,8 +54,6 @@ async def remove_foreground() -> Response:
         )
     except CasperNotReadyError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
-    except CasperBusyError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
     except CasperRunError as exc:
         logger.exception("casper run failed")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -91,19 +86,24 @@ async def remove_foreground() -> Response:
             detail="failed to reinitialize SAM state on new base video",
         )
 
-    new_session = session_slot.swap_base_video(
-        new_base_video_path=new_video_path,
+    # 旧 session のバックグラウンド抽出が走っていれば完了を待つ
+    # (実際には /segment が wait_ready で待っているので no-op の場合が多い)
+    await session.wait_for_tasks()
+
+    new_session = Session(
+        base_video_path=new_video_path,
         width=new_meta.width,
         height=new_meta.height,
         fps=new_meta.fps,
         num_frames=new_meta.num_frames,
+        created_at=time.time(),
     )
-    mask_store.clear()
-
     # base video が差し替わったので、全前景データも再生成する。
     # ここで再 propagate を待たない: lazy に /segment が wait_ready する。
-    full_foreground_store.start_loading()
-    from backend.routes.session import _extract_full_foreground  # 循環 import 回避のため遅延 import
-    asyncio.create_task(_extract_full_foreground(new_session))
+    new_session.full_foreground_store.start_loading()
+    session_slot.install(new_session)
+
+    from backend.routes.session import schedule_extraction  # 循環 import 回避のため遅延 import
+    schedule_extraction(new_session)
 
     return Response(content=mp4_bytes, media_type="video/mp4")

@@ -9,9 +9,7 @@ from backend.media.video_io import composite_overlay_to_mp4
 from backend.ml.casper import preload_casper
 from backend.ml.sam import sam2
 from backend.schemas import SegmentRequest
-from backend.stores.full_foreground_store import full_foreground_store
-from backend.stores.mask_store import mask_store
-from backend.stores.session import session_slot
+from backend.state.session import session_slot
 
 
 router = APIRouter()
@@ -56,13 +54,13 @@ async def segment(req: SegmentRequest) -> Response:
 
     # 全前景抽出（バックグラウンド）の完了を待つ。タイムアウトは長めに
     try:
-        await full_foreground_store.wait_ready(timeout=600.0)
+        await session.full_foreground_store.wait_ready(timeout=600.0)
     except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
-    full_fg = full_foreground_store.current()
+    full_fg = session.full_foreground_store.current()
     if full_fg is None:
         raise HTTPException(status_code=503, detail="full foreground data unavailable")
     if full_fg.base_video_path != session.base_video_path:
@@ -120,7 +118,7 @@ async def segment(req: SegmentRequest) -> Response:
         raise HTTPException(status_code=500, detail="composite encoding failed")
 
     # /remove で再利用するため、生成した trimask をサーバ側に保持する
-    mask_store.set(
+    session.mask_store.set(
         trimask=trimask,
         base_video_path=session.base_video_path,
         fps=fps,

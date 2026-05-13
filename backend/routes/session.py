@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
@@ -11,9 +12,7 @@ from backend.media.video_io import probe_video, read_frame_at
 from backend.ml.detector import detectron2
 from backend.ml.sam import sam2
 from backend.schemas import VideoMeta
-from backend.stores.full_foreground_store import full_foreground_store
-from backend.stores.mask_store import mask_store
-from backend.stores.session import Session, session_slot
+from backend.state.session import Session, session_slot
 
 
 router = APIRouter()
@@ -28,6 +27,12 @@ async def start_session(video: UploadFile = File(...)) -> VideoMeta:
         raise HTTPException(status_code=503, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+    # 旧 session のバックグラウンド抽出が走っていれば完了を待つ
+    # (新 session の GPU 処理と並走しないようにする)
+    old_session = session_slot.current()
+    if old_session is not None:
+        await old_session.wait_for_tasks()
 
     suffix = os.path.splitext(video.filename or "")[1] or ".mp4"
     fd, tmp_path = tempfile.mkstemp(suffix=suffix)
@@ -44,20 +49,21 @@ async def start_session(video: UploadFile = File(...)) -> VideoMeta:
 
         sam2.open_session(video_path=tmp_path)
 
-        session = session_slot.replace(
+        session = Session(
             base_video_path=tmp_path,
             width=meta.width,
             height=meta.height,
             fps=meta.fps,
             num_frames=meta.num_frames,
+            created_at=time.time(),
         )
-        # 新規セッション開始時に直前のマスク・全前景データは無効
-        mask_store.clear()
-        full_foreground_store.start_loading()
+        # 全前景抽出を起動することを示す状態にしてから publish
+        session.full_foreground_store.start_loading()
+        session_slot.install(session)
 
         # 全前景抽出（R-CNN + SAM propagate）はバックグラウンドで実行。
         # `/session` は即時 VideoMeta を返し、`/segment` 側で wait_ready する。
-        asyncio.create_task(_extract_full_foreground(session))
+        schedule_extraction(session)
     except HTTPException:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -77,12 +83,21 @@ async def start_session(video: UploadFile = File(...)) -> VideoMeta:
     )
 
 
+def schedule_extraction(session: Session) -> None:
+    """セッションの全前景抽出をバックグラウンドで起動し、
+    `session.background_tasks` に登録する。
+    """
+    task = asyncio.create_task(_extract_full_foreground(session))
+    session.add_task(task)
+
+
 async def _extract_full_foreground(session: Session) -> None:
     """中間フレームに COCO Mask R-CNN で物体検出 → 各 bbox を SAM で全フレームに propagate。
 
-    結果を `full_foreground_store` に保存する。`/session` 完了後にバックグラウンドで実行される。
-    SAM2 のセッション状態（`sam2._state`）を共有して使うが、`sam2.segment_from_bboxes` が
-    終了時に reset するので、後続の `/segment` は通常通り使える。
+    結果を `session.full_foreground_store` に保存する。`/session` 完了後に
+    バックグラウンドで実行される。SAM2 のセッション状態（`sam2._state`）を共有して
+    使うが、`sam2.segment_from_bboxes` が終了時に reset するので、後続の
+    `/segment` は通常通り使える。
     """
     base_video_path = session.base_video_path
     try:
@@ -98,7 +113,7 @@ async def _extract_full_foreground(session: Session) -> None:
 
         # 検出 0 のときも空リストを保持して ready 状態に遷移
         if not detected_bboxes:
-            full_foreground_store.set_ready(object_masks=[], base_video_path=base_video_path)
+            session.full_foreground_store.set_ready(object_masks=[], base_video_path=base_video_path)
             return
 
         # SAM video propagate を別 thread で実行
@@ -107,11 +122,11 @@ async def _extract_full_foreground(session: Session) -> None:
             detected_bboxes,
             keyframe_idx=middle_frame_idx,
         )
-        full_foreground_store.set_ready(
+        session.full_foreground_store.set_ready(
             object_masks=object_masks,
             base_video_path=base_video_path,
         )
         logger.info("full foreground extraction complete: %d objects", len(object_masks))
     except Exception as exc:
         logger.exception("full foreground extraction failed")
-        full_foreground_store.set_failed(str(exc))
+        session.full_foreground_store.set_failed(str(exc))
