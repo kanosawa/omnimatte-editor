@@ -4,7 +4,6 @@ import os
 import shutil
 import tempfile
 
-import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from backend.config import MODEL_STARTUP_TIMEOUT_SEC
@@ -79,11 +78,11 @@ async def start_session(video: UploadFile = File(...)) -> VideoMeta:
 
 
 async def _extract_full_foreground(session: Session) -> None:
-    """中間フレームに COCO Mask R-CNN を実行 → 各検出を SAM で全フレームに propagate。
+    """中間フレームに COCO Mask R-CNN で物体検出 → 各 bbox を SAM で全フレームに propagate。
 
     結果を `full_foreground_store` に保存する。`/session` 完了後にバックグラウンドで実行される。
-    SAM2 のセッション状態（`sam2._state`）を共有して使うが、最後に `sam2.reset()`
-    してから返るので、後続の `/segment` は通常通り使える。
+    SAM2 のセッション状態（`sam2._state`）を共有して使うが、`sam2.segment_from_bboxes` が
+    終了時に reset するので、後続の `/segment` は通常通り使える。
     """
     base_video_path = session.base_video_path
     try:
@@ -93,21 +92,20 @@ async def _extract_full_foreground(session: Session) -> None:
         middle_frame_idx = session.num_frames // 2
         frame_bgr = await asyncio.to_thread(read_frame_at, base_video_path, middle_frame_idx)
 
-        # Detectron2 で物体検出（class-agnostic）
-        detected_masks = await asyncio.to_thread(detectron2.detect, frame_bgr)
-        logger.info("R-CNN detected %d objects on frame %d", len(detected_masks), middle_frame_idx)
+        # Detectron2 で物体検出（class-agnostic、bbox のみ）
+        detected_bboxes = await asyncio.to_thread(detectron2.detect, frame_bgr)
+        logger.info("R-CNN detected %d objects on frame %d", len(detected_bboxes), middle_frame_idx)
 
         # 検出 0 のときも空リストを保持して ready 状態に遷移
-        if not detected_masks:
+        if not detected_bboxes:
             full_foreground_store.set_ready(per_object_masks=[], base_video_path=base_video_path)
             return
 
         # SAM video propagate を別 thread で実行
         per_object_masks = await asyncio.to_thread(
-            _propagate_detected_masks,
-            session,
-            detected_masks,
-            middle_frame_idx,
+            sam2.segment_from_bboxes,
+            detected_bboxes,
+            keyframe_idx=middle_frame_idx,
         )
         full_foreground_store.set_ready(
             per_object_masks=per_object_masks,
@@ -117,39 +115,3 @@ async def _extract_full_foreground(session: Session) -> None:
     except Exception as exc:
         logger.exception("full foreground extraction failed")
         full_foreground_store.set_failed(str(exc))
-
-
-def _propagate_detected_masks(
-    session: Session,
-    detected_masks: list[np.ndarray],
-    keyframe_idx: int,
-) -> list[np.ndarray]:
-    """各 detected mask を SAM video predictor に登録し、順方向＋逆方向に propagate。
-
-    返り値: list of (T, H, W) bool。検出物体 1 つあたり 1 枚。
-    """
-    n_objects = len(detected_masks)
-    n_frames = session.num_frames
-    h, w = session.height, session.width
-
-    per_object: list[np.ndarray] = [
-        np.zeros((n_frames, h, w), dtype=bool) for _ in range(n_objects)
-    ]
-
-    sam2.reset()
-    for obj_id, mask in enumerate(detected_masks):
-        sam2.add_mask(frame_idx=keyframe_idx, obj_id=obj_id, mask=mask)
-
-    for frame_idx, obj_ids, masks in sam2.propagate(start_frame_idx=keyframe_idx):
-        for i, obj_id in enumerate(obj_ids):
-            per_object[obj_id][frame_idx] = masks[i]
-    for frame_idx, obj_ids, masks in sam2.propagate(
-        start_frame_idx=keyframe_idx, reverse=True,
-    ):
-        for i, obj_id in enumerate(obj_ids):
-            per_object[obj_id][frame_idx] = masks[i]
-
-    # /segment が後でクリーンな state を使えるように reset
-    sam2.reset()
-
-    return per_object

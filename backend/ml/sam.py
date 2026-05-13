@@ -1,8 +1,11 @@
 """SAM2 video predictor wrapper.
 
 `sam2` パッケージ(pip install 経由)の `Sam2VideoPredictor` をラップする。
-`add_bbox_prompt` は video predictor の `add_new_points_or_box` に bbox を直接渡し、
-返ってきた `video_res_masks`(元解像度 logits)を bool 化して返す。
+細粒度の reset / add_prompt / propagate ではなく、タスク単位の高位 API
+(`segment_from_bbox` / `segment_from_bboxes`) を公開する。
+prompt はすべて bbox 経由（SAM2 が bbox から内部で再セグメントする方が
+境界が綺麗）に統一し、reset 忘れによる prompt・memory bank 混入の事故を
+呼び出し側に起こさせない設計。
 
 アプリ全体で同時に存在する SAM2 セッションは常に最大 1 件なので、`inference_state`
 はこのクラス内部に持ち、呼び出し側には不透明ハンドルとして渡さない。
@@ -14,7 +17,7 @@ import logging
 import os
 import numpy as np
 import torch
-from typing import Any, Iterator
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +27,6 @@ logger = logging.getLogger(__name__)
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAM2_CFG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 SAM2_CKPT = os.path.join(_BACKEND_DIR, "models", "sam2", "sam2.1_hiera_large.pt")
-
-
-PropagateItem = tuple[int, list[int], list[np.ndarray]]
-"""propagate() の yield 単位。
-
-- frame_idx: フレーム番号
-- obj_ids: そのフレームで結果が得られた object_id のリスト
-- masks: 各 obj_id に対応する bool[H, W] マスク（base video 解像度）
-"""
 
 
 class Sam2:
@@ -73,88 +67,77 @@ class Sam2:
         if self._error is not None:
             raise RuntimeError(f"model failed to load: {self._error}")
 
-    # ---------- セッション ----------
-
-    def _require_predictor(self):
-        if self._predictor is None:
-            raise RuntimeError("SAM2 predictor not loaded")
-        return self._predictor
-
-    def _require_state(self) -> Any:
-        if self._state is None:
-            raise RuntimeError("SAM2 session not opened")
-        return self._state
-
     def open_session(self, video_path: str) -> None:
-        predictor = self._require_predictor()
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            self._state = predictor.init_state(video_path=video_path)
+            self._state = self._predictor.init_state(video_path=video_path)
 
-    def reset(self) -> None:
-        predictor = self._require_predictor()
-        state = self._require_state()
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            predictor.reset_state(state)
-
-    # ---------- マスク登録 ----------
-
-    def add_mask(self, frame_idx: int, obj_id: int, mask: np.ndarray) -> None:
-        predictor = self._require_predictor()
-        state = self._require_state()
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            predictor.add_new_mask(
-                inference_state=state,
-                frame_idx=frame_idx,
-                obj_id=obj_id,
-                mask=mask,
-            )
-
-    def add_bbox_prompt(
+    def segment_from_bbox(
         self,
         frame_idx: int,
-        obj_id: int,
         bbox: list[float],
-        height: int,
-        width: int,
     ) -> np.ndarray:
-        predictor = self._require_predictor()
-        state = self._require_state()
-        box = np.asarray(bbox, dtype=np.float32)  # xyxy pixel
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            _, out_obj_ids, video_res_masks = predictor.add_new_points_or_box(
-                inference_state=state,
-                frame_idx=frame_idx,
-                obj_id=obj_id,
-                box=box,
-            )
-        # video_res_masks: tensor (N, 1, H, W) の logits（base video 解像度）
-        try:
-            i = list(int(x) for x in out_obj_ids).index(int(obj_id))
-        except ValueError:
-            i = 0
-        m = video_res_masks[i]
-        if m.ndim == 3:
-            m = m[0]
-        return (m > 0.0).cpu().numpy().astype(bool)
+        """単一 bbox 版。`segment_from_bboxes` の薄いラッパー。
 
-    # ---------- 伝播 ----------
+        戻り値: (T, H, W) bool。SAM2 が yield しなかったフレームは zero-fill。
+        """
+        return self.segment_from_bboxes([bbox], keyframe_idx=frame_idx)[0]
 
-    def propagate(
+    def segment_from_bboxes(
         self,
-        start_frame_idx: int,
-        reverse: bool = False,
-    ) -> Iterator[PropagateItem]:
-        predictor = self._require_predictor()
-        state = self._require_state()
+        bboxes: list[list[float]],
+        keyframe_idx: int,
+    ) -> list[np.ndarray]:
+        """各 bbox を登録 → 全フレームに順 + 逆方向 propagate。
+
+        - 内部で reset → add_new_points_or_box × N → propagate を行い、最後にも reset する。
+          後続呼び出し時に前回の prompt は残らない。
+        - 戻り値: list of (T, H, W) bool。bbox 1 個につき 1 枚。
+        """
+        num_frames, height, width = self._dims()
+        per_object: list[np.ndarray] = [
+            np.zeros((num_frames, height, width), dtype=bool) for _ in bboxes
+        ]
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(
-                state, start_frame_idx=start_frame_idx, reverse=reverse,
+            self._predictor.reset_state(self._state)
+            for obj_id, bbox in enumerate(bboxes):
+                box = np.asarray(bbox, dtype=np.float32)  # xyxy pixel
+                self._predictor.add_new_points_or_box(
+                    inference_state=self._state,
+                    frame_idx=keyframe_idx,
+                    obj_id=obj_id,
+                    box=box,
+                )
+            self._collect_propagation(out_by_obj=per_object, start_frame_idx=keyframe_idx)
+            self._predictor.reset_state(self._state)
+        return per_object
+
+    # ---------- 内部ヘルパー ----------
+
+    def _collect_propagation(
+        self,
+        out_by_obj: list[np.ndarray],
+        start_frame_idx: int,
+    ) -> None:
+        """順 + 逆方向に propagate し、各 obj_id ごとの (T, H, W) 出力に書き込む。
+
+        呼び出し時点で autocast / inference_mode のコンテキストにいる前提。
+        prompt は事前に登録済みであること。
+        """
+        for reverse in (False, True):
+            for frame_idx, obj_ids, mask_logits in self._predictor.propagate_in_video(
+                self._state, start_frame_idx=start_frame_idx, reverse=reverse,
             ):
-                # mask_logits: (N, 1, H, W) tensor
-                masks = [
-                    (mask_logits[i, 0] > 0.0).cpu().numpy() for i in range(len(obj_ids))
-                ]
-                yield int(frame_idx), [int(x) for x in obj_ids], masks
+                fi = int(frame_idx)
+                for i, oid in enumerate(obj_ids):
+                    out_by_obj[int(oid)][fi] = (mask_logits[i, 0] > 0.0).cpu().numpy()
+
+    def _dims(self) -> tuple[int, int, int]:
+        """現在の inference_state から (num_frames, height, width) を取り出す。
+
+        SAM2 の inference_state dict のキー名に依存する。
+        """
+        s = self._state
+        return int(s["num_frames"]), int(s["video_height"]), int(s["video_width"])
 
 
 sam2 = Sam2()

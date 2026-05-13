@@ -1,7 +1,8 @@
 """Detectron2 (COCO Mask R-CNN) を class-agnostic で使う物体検出ホルダ。
 
-クラスラベルは無視し、インスタンスマスクのみを返す。
-SAM2 への propagation 用に中間フレームでの 1 ショット推論で利用する。
+クラスラベルは無視し、インスタンスの bbox のみを返す。マスク自体は SAM2 が
+bbox から再セグメントする方が境界が綺麗なので、ここでは面積フィルタの算出に
+だけ使い、SAM2 への prompt は bbox に統一する。
 """
 import asyncio
 import logging
@@ -61,16 +62,16 @@ class Detectron2:
         if self._error is not None:
             raise RuntimeError(f"detector failed to load: {self._error}")
 
-    def detect(self, frame_bgr: np.ndarray) -> list[np.ndarray]:
-        """1 フレームに対して COCO Mask R-CNN を走らせ、class-agnostic にインスタンスマスクを返す。
+    def detect(self, frame_bgr: np.ndarray) -> list[list[float]]:
+        """1 フレームに対して COCO Mask R-CNN を走らせ、class-agnostic に bbox を返す。
 
-        フィルタ:
+        フィルタ（マスク面積ベース。bbox 面積で代用すると細長い物体を誤判定するため）:
         - score < DETECTRON2_SCORE_THRESH（cfg 設定で既に効いている）
-        - 面積 < DETECTRON2_MIN_AREA_RATIO * H * W は除外
-        - area 降順で上位 DETECTRON2_MAX_DETECTIONS 個を残す
+        - マスク面積 < DETECTRON2_MIN_AREA_RATIO * H * W は除外
+        - マスク面積降順で上位 DETECTRON2_MAX_DETECTIONS 個を残す
 
         Returns:
-            list of (H, W) bool マスク。area 降順
+            list of [x1, y1, x2, y2] (xyxy pixel float)。マスク面積降順
         """
         if self._predictor is None:
             raise RuntimeError("detector predictor not loaded")
@@ -79,17 +80,18 @@ class Detectron2:
         if len(instances) == 0:
             return []
 
-        masks = instances.pred_masks.cpu().numpy()  # (N, H, W) bool
-        areas = masks.sum(axis=(1, 2))              # (N,)
+        masks = instances.pred_masks.cpu().numpy()           # (N, H, W) bool
+        boxes = instances.pred_boxes.tensor.cpu().numpy()    # (N, 4) xyxy float
+        areas = masks.sum(axis=(1, 2))                       # (N,)
         h, w = masks.shape[1], masks.shape[2]
         min_area = DETECTRON2_MIN_AREA_RATIO * h * w
 
         order = np.argsort(-areas)  # area 降順
-        result: list[np.ndarray] = []
+        result: list[list[float]] = []
         for idx in order:
             if areas[idx] < min_area:
                 continue
-            result.append(masks[idx].astype(bool))
+            result.append(boxes[idx].tolist())
             if len(result) >= DETECTRON2_MAX_DETECTIONS:
                 break
         return result

@@ -68,41 +68,15 @@ async def segment(req: SegmentRequest) -> Response:
     if full_fg.base_video_path != session.base_video_path:
         raise HTTPException(status_code=409, detail="full foreground data is stale")
 
-    results: dict[int, np.ndarray] = {}
-
     try:
-        # 1. backend に bbox プロンプトを登録（video predictor の
-        #    add_new_points_or_box に bbox を直接渡す）。
-        #    呼び出し側はリセットしてから登録 → 順 / 逆 propagate するだけ。
-        sam2.reset()
-        sam2.add_bbox_prompt(
-            frame_idx=req.frame_idx,
-            obj_id=0,
-            bbox=req.bbox,
-            height=session.height,
-            width=session.width,
-        )
-
-        for frame_idx, _obj_ids, masks in sam2.propagate(start_frame_idx=req.frame_idx):
-            results[frame_idx] = masks[0]
-        for frame_idx, _obj_ids, masks in sam2.propagate(
-            start_frame_idx=req.frame_idx, reverse=True,
-        ):
-            results[frame_idx] = masks[0]
+        masks_target = sam2.segment_from_bbox(
+            frame_idx=req.frame_idx, bbox=req.bbox,
+        )  # (T, H, W) bool
     except Exception:
         logger.exception("segmentation failed")
         raise HTTPException(status_code=500, detail="segmentation failed")
 
-    if not results:
-        raise HTTPException(status_code=500, detail="no masks produced")
-
-    masks_in_order = []
-    for i in range(session.num_frames):
-        if i in results:
-            masks_in_order.append(results[i])
-        else:
-            masks_in_order.append(np.zeros((session.height, session.width), dtype=bool))
-    masks_target = np.stack(masks_in_order, axis=0)  # (T, H, W) bool
+    masks_in_order = list(masks_target)  # composite 用に (H, W) のリストへ展開
 
     # R-CNN 検出物体から、対象前景と高 IoU のものを除外（領域単位）。
     # IoU は req.frame_idx 時点で計算（BBox を打ったフレーム）
