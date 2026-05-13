@@ -1,9 +1,3 @@
-"""Detectron2 (COCO Mask R-CNN) を class-agnostic で使う物体検出ホルダ。
-
-クラスラベルは無視し、インスタンスの bbox のみを返す。マスク自体は SAM2 が
-bbox から再セグメントする方が境界が綺麗なので、ここでは面積フィルタの算出に
-だけ使い、SAM2 への prompt は bbox に統一する。
-"""
 import asyncio
 import logging
 import numpy as np
@@ -65,7 +59,7 @@ class Detectron2:
     def detect(self, frame_bgr: np.ndarray) -> list[list[float]]:
         """1 フレームに対して COCO Mask R-CNN を走らせ、class-agnostic に bbox を返す。
 
-        フィルタ（マスク面積ベース。bbox 面積で代用すると細長い物体を誤判定するため）:
+        フィルタ:
         - score < DETECTRON2_SCORE_THRESH（cfg 設定で既に効いている）
         - マスク面積 < DETECTRON2_MIN_AREA_RATIO * H * W は除外
         - マスク面積降順で上位 DETECTRON2_MAX_DETECTIONS 個を残す

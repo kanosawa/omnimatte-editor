@@ -29,7 +29,7 @@ class _State(Enum):
 
 @dataclass
 class FullForegroundRecord:
-    per_object_masks: list[np.ndarray]  # 各要素 (T, H, W) bool。検出物体 1 つあたり 1 枚
+    object_masks: list[np.ndarray]  # 各要素 (T, H, W) bool。検出物体 1 つあたり 1 枚
     base_video_path: str                # マスク生成時点の base video パス（整合性チェック用）
     created_at: float
 
@@ -57,9 +57,9 @@ class FullForegroundStore:
         # asyncio.Event は loop に紐づくので新規作成
         self._ready_event = asyncio.Event()
 
-    def set_ready(self, per_object_masks: list[np.ndarray], base_video_path: str) -> None:
+    def set_ready(self, object_masks: list[np.ndarray], base_video_path: str) -> None:
         record = FullForegroundRecord(
-            per_object_masks=per_object_masks,
+            object_masks=object_masks,
             base_video_path=base_video_path,
             created_at=time.time(),
         )

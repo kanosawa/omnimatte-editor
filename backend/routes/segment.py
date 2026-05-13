@@ -69,9 +69,9 @@ async def segment(req: SegmentRequest) -> Response:
         raise HTTPException(status_code=409, detail="full foreground data is stale")
 
     try:
-        masks_target = sam2.segment_from_bbox(
-            frame_idx=req.frame_idx, bbox=req.bbox,
-        )  # (T, H, W) bool
+        masks_target = sam2.segment_from_bboxes(
+            [req.bbox], keyframe_idx=req.frame_idx,
+        )[0]  # (T, H, W) bool
     except Exception:
         logger.exception("segmentation failed")
         raise HTTPException(status_code=500, detail="segmentation failed")
@@ -84,7 +84,7 @@ async def segment(req: SegmentRequest) -> Response:
     other_fg_combined = np.zeros_like(masks_target, dtype=bool)
     excluded = 0
     kept = 0
-    for obj_masks in full_fg.per_object_masks:
+    for obj_masks in full_fg.object_masks:
         if obj_masks.shape != masks_target.shape:
             logger.warning(
                 "skip object: shape mismatch %s vs %s",

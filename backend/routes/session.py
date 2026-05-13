@@ -98,20 +98,20 @@ async def _extract_full_foreground(session: Session) -> None:
 
         # 検出 0 のときも空リストを保持して ready 状態に遷移
         if not detected_bboxes:
-            full_foreground_store.set_ready(per_object_masks=[], base_video_path=base_video_path)
+            full_foreground_store.set_ready(object_masks=[], base_video_path=base_video_path)
             return
 
         # SAM video propagate を別 thread で実行
-        per_object_masks = await asyncio.to_thread(
+        object_masks = await asyncio.to_thread(
             sam2.segment_from_bboxes,
             detected_bboxes,
             keyframe_idx=middle_frame_idx,
         )
         full_foreground_store.set_ready(
-            per_object_masks=per_object_masks,
+            object_masks=object_masks,
             base_video_path=base_video_path,
         )
-        logger.info("full foreground extraction complete: %d objects", len(per_object_masks))
+        logger.info("full foreground extraction complete: %d objects", len(object_masks))
     except Exception as exc:
         logger.exception("full foreground extraction failed")
         full_foreground_store.set_failed(str(exc))
