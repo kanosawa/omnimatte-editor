@@ -30,6 +30,7 @@ const sshArgs = [
   '-o', 'ExitOnForwardFailure=yes',
   '-o', 'ServerAliveInterval=30',
   '-o', 'ServerAliveCountMax=3',
+  '-o', 'StrictHostKeyChecking=accept-new',
   '-L', `${localPort}:127.0.0.1:${backendPort}`,
   '-p', sshPort,
   `${user}@${host}`,
