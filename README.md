@@ -2,7 +2,7 @@
 
 A demo app for removing a specified object together with its associated regions (shadows, reflections, etc.) from a video. Masks are produced with [SAM2](https://github.com/facebookresearch/sam2), and the object is removed with [Generative Omnimatte](https://github.com/kanosawa/gen-omnimatte-public). [Detectron2](https://github.com/facebookresearch/detectron2) is used for preprocessing.
 
-<video src="[assets/demo.mp4](https://github.com/user-attachments/assets/962599d9-9981-4f6f-9e19-401f9afd28a8)" width="100%" controls autoplay loop muted></video>
+<video src="https://github.com/user-attachments/assets/962599d9-9981-4f6f-9e19-401f9afd28a8" width="100%" controls autoplay loop muted></video>
 
 ## Usage
 
