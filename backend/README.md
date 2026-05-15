@@ -24,5 +24,3 @@ From the repository root:
 ```bash
 python -m backend.main
 ```
-
-Listens on `127.0.0.1:8000` (not reachable from outside).

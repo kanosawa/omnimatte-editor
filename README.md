@@ -4,6 +4,14 @@ A demo app for removing a specified object together with its associated regions 
 
 ![demo](assets/demo.webp)
 
+## Clone
+
+This repository contains submodules, so clone with `--recursive`:
+
+```bash
+git clone --recursive https://github.com/kanosawa/omnimatte-editor
+```
+
 ## Usage
 
 The backend runs on a GPU server and the frontend runs on a local machine, connecting through an SSH tunnel. Tested with Ubuntu for the backend and Windows for the frontend; other environments may also work.
