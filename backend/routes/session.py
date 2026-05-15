@@ -6,7 +6,7 @@ import tempfile
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from backend.config import MODEL_STARTUP_TIMEOUT_SEC
-from backend.ml.sam import sam2
+from backend.predictors.sam import sam2
 from backend.schemas import VideoMeta
 from backend.state.session import session_slot
 

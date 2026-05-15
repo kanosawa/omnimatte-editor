@@ -12,7 +12,7 @@ import numpy as np
 
 from backend.config import MODEL_STARTUP_TIMEOUT_SEC
 from backend.media.video_io import VideoMetadata, write_trimask_mp4
-from backend.ml.casper_adapter import CASPER_TRANSFORMER_PATH, CasperAdapter
+from backend.predictors.casper_adapter import CASPER_TRANSFORMER_PATH, CasperAdapter
 
 
 logger = logging.getLogger(__name__)

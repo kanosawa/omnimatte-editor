@@ -5,8 +5,8 @@ from fastapi import APIRouter, HTTPException, Response
 
 from backend.config import DETECTRON2_IOU_WITH_TARGET, MODEL_STARTUP_TIMEOUT_SEC
 from backend.media.video_io import composite_overlay_to_mp4
-from backend.ml.casper import casper
-from backend.ml.sam import sam2
+from backend.predictors.casper import casper
+from backend.predictors.sam import sam2
 from backend.schemas import SegmentRequest
 from backend.state.session import session_slot
 
