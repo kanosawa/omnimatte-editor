@@ -5,11 +5,7 @@ import tempfile
 from fastapi import APIRouter, HTTPException, Response
 
 from backend.config import MODEL_STARTUP_TIMEOUT_SEC
-from backend.ml.casper import (
-    CasperNotReadyError,
-    CasperRunError,
-    run_casper,
-)
+from backend.ml.casper import run_casper
 from backend.ml.sam import sam2
 from backend.state.session import session_slot
 
@@ -50,11 +46,10 @@ async def remove_foreground() -> Response:
             width=session.meta.width,
             height=session.meta.height,
         )
-    except CasperNotReadyError as exc:
+    except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
-    except CasperRunError as exc:
-        logger.exception("casper run failed")
-        raise HTTPException(status_code=500, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     except Exception:
         logger.exception("foreground removal failed")
         raise HTTPException(status_code=500, detail="foreground removal failed")

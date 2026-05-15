@@ -45,18 +45,6 @@ CASPER_DEFAULT_PROMPT = "a clean background video."
 
 
 # ============================================================================
-# 例外
-# ============================================================================
-
-class CasperNotReadyError(Exception):
-    """Casper モデルがロード中 / 失敗で呼べない状態。`/remove` で 503 にマップ。"""
-
-
-class CasperRunError(Exception):
-    """Casper 推論パイプライン内で例外が発生（500）。"""
-
-
-# ============================================================================
 # ロード状態管理
 # ============================================================================
 
@@ -100,14 +88,14 @@ class Casper:
     async def wait_ready(self, timeout: float | None = None) -> None:
         if self._ready_event.is_set():
             if self._error is not None:
-                raise CasperNotReadyError(f"casper failed to load: {self._error}")
+                raise RuntimeError(f"casper failed to load: {self._error}")
             return
         try:
             await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
         except asyncio.TimeoutError as exc:
-            raise CasperNotReadyError("casper not ready (timeout)") from exc
+            raise TimeoutError("casper not ready (timeout)") from exc
         if self._error is not None:
-            raise CasperNotReadyError(f"casper failed to load: {self._error}")
+            raise RuntimeError(f"casper failed to load: {self._error}")
 
 
 casper = Casper()
@@ -275,13 +263,7 @@ async def run_casper(
             logger.warning("[run] preload failed; falling back to fresh run")
 
     logger.info("[run] preload MISS: running pipeline")
-    try:
-        return await _execute(base_video_path, trimask, fps, width, height)
-    except ValueError as exc:
-        raise CasperRunError(str(exc)) from exc
-    except Exception as exc:
-        logger.exception("[run] pipeline failed")
-        raise CasperRunError(f"casper run failed: {exc}") from exc
+    return await _execute(base_video_path, trimask, fps, width, height)
 
 
 async def preload_casper(
