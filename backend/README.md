@@ -24,3 +24,9 @@ From the repository root:
 ```bash
 python -m backend.main
 ```
+
+The backend is ready when the following log message appears:
+
+```
+[INFO] backend.predictors.casper: casper adapter loaded
+```
