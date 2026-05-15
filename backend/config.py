@@ -1,4 +1,5 @@
 MODEL_STARTUP_TIMEOUT_SEC = 30.0 # 各モデルの wait_ready 共通タイムアウト秒数
+FULL_FOREGROUND_WAIT_TIMEOUT_SEC = 600.0 # 全前景抽出（Detectron2 で全フレーム処理）の完了待ち
 
 DETECTRON2_SCORE_THRESH = 0.5
 DETECTRON2_MAX_DETECTIONS = 5      # 検出数の上限（area 降順で上位）

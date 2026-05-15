@@ -3,7 +3,11 @@ import logging
 import numpy as np
 from fastapi import APIRouter, HTTPException, Response
 
-from backend.config import DETECTRON2_IOU_WITH_TARGET, MODEL_STARTUP_TIMEOUT_SEC
+from backend.config import (
+    DETECTRON2_IOU_WITH_TARGET,
+    FULL_FOREGROUND_WAIT_TIMEOUT_SEC,
+    MODEL_STARTUP_TIMEOUT_SEC,
+)
 from backend.media.video_io import composite_overlay_to_mp4
 from backend.predictors.casper import casper
 from backend.predictors.sam2 import sam2
@@ -15,10 +19,6 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-# Casper の trimask 規約（mp4 ピクセル値）。Casper 内部でバケット化される:
-#   < 64    → remove (1.0)
-#   64-192  → neutral (0.5)
-#   > 192   → keep (0.0)
 TRIMASK_REMOVE = 0      # 対象前景（消す）
 TRIMASK_NEUTRAL = 128   # 背景（neutral）
 TRIMASK_KEEP = 255      # 他の前景（残す）
@@ -43,17 +43,14 @@ async def segment(req: SegmentRequest) -> Response:
             detail=f"frame_idx out of range: {req.frame_idx} >= {session.meta.num_frames}",
         )
 
-    # 診断用: 受け取ったパラメータと base video のパスをログに出す。
-    # これを scripts/sam2_diagnose.py に同じ値で渡せば、実験コードパスでの結果と直接比較できる。
     logger.info(
         "segment request: frame_idx=%d bbox=%s session=(%dx%d) num_frames=%d base_video=%s",
         req.frame_idx, req.bbox, session.meta.width, session.meta.height, session.meta.num_frames,
         session.base_video_path,
     )
 
-    # 全前景抽出（バックグラウンド）の完了を待つ。タイムアウトは長めに
     try:
-        await session.full_foreground_store.wait_ready(timeout=600.0)
+        await session.full_foreground_store.wait_ready(timeout=FULL_FOREGROUND_WAIT_TIMEOUT_SEC)
     except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except RuntimeError as exc:
@@ -101,18 +98,15 @@ async def segment(req: SegmentRequest) -> Response:
         int(target_at_frame.sum()), kept, excluded,
     )
 
-    # trimask 構築（mp4 ピクセル値で 3 値）。
-    # 既定 = neutral、他の前景 = keep、対象前景 = remove（target が他より優先）
     trimask = np.full(masks_target.shape, TRIMASK_NEUTRAL, dtype=np.uint8)
     trimask[other_fg_combined & ~masks_target] = TRIMASK_KEEP
     trimask[masks_target] = TRIMASK_REMOVE
 
-    fps = session.meta.fps
     try:
         mp4_bytes = composite_overlay_to_mp4(
             original_video_path=session.base_video_path,
             masks_in_order=masks_in_order,
-            fps=fps,
+            fps=session.meta.fps,
         )
     except Exception:
         logger.exception("composite encoding failed")
@@ -122,12 +116,10 @@ async def segment(req: SegmentRequest) -> Response:
     session.mask_store.set(
         trimask=trimask,
         base_video_path=session.base_video_path,
-        fps=fps,
+        fps=session.meta.fps,
     )
 
     # 先回り Casper 推論をバックグラウンドで起動（fire-and-forget）。
-    # ユーザーが結果を眺めて「前景削除」ボタンを押すまでに本サーバ内で
-    # 計算を済ませてキャッシュするので、/remove は cache hit で即返ることが期待される。
     casper.preload(
         base_video_path=session.base_video_path,
         trimask=trimask,
