@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Response
 
 from backend.config import MODEL_STARTUP_TIMEOUT_SEC
 from backend.predictors.casper import casper
-from backend.predictors.sam import sam2
+from backend.predictors.sam2 import sam2
 from backend.state.session import session_slot
 
 

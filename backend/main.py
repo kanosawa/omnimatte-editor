@@ -16,8 +16,8 @@ if not torch.cuda.is_available():
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.predictors.detector import detectron2
-from backend.predictors.sam import sam2
+from backend.predictors.detectron2 import detectron2
+from backend.predictors.sam2 import sam2
 from backend.predictors.casper import casper
 from backend.routes import removal, segment, session
 

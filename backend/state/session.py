@@ -7,8 +7,8 @@ import numpy as np
 
 from backend.config import MODEL_STARTUP_TIMEOUT_SEC
 from backend.media.video_io import VideoMetadata, probe_video, read_frame_at
-from backend.predictors.detector import detectron2
-from backend.predictors.sam import sam2
+from backend.predictors.detectron2 import detectron2
+from backend.predictors.sam2 import sam2
 from backend.state.stores.full_foreground import FullForegroundRecord, FullForegroundStore
 from backend.state.stores.mask import MaskStore
 
