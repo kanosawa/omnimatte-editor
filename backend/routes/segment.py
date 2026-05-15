@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 import numpy as np
@@ -129,14 +128,10 @@ async def segment(req: SegmentRequest) -> Response:
     # 先回り Casper 推論をバックグラウンドで起動（fire-and-forget）。
     # ユーザーが結果を眺めて「前景削除」ボタンを押すまでに本サーバ内で
     # 計算を済ませてキャッシュするので、/remove は cache hit で即返ることが期待される。
-    asyncio.create_task(
-        preload_casper(
-            base_video_path=session.base_video_path,
-            trimask=trimask,
-            fps=fps,
-            width=session.meta.width,
-            height=session.meta.height,
-        )
+    preload_casper(
+        base_video_path=session.base_video_path,
+        trimask=trimask,
+        meta=session.meta,
     )
 
     return Response(content=mp4_bytes, media_type="video/mp4")

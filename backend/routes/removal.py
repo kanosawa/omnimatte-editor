@@ -36,15 +36,12 @@ async def remove_foreground() -> Response:
         raise HTTPException(status_code=409, detail="mask is stale")
 
     base_video_path = session.base_video_path
-    fps = session.meta.fps
 
     try:
         mp4_bytes = await run_casper(
             base_video_path=base_video_path,
             trimask=record.trimask,
-            fps=fps,
-            width=session.meta.width,
-            height=session.meta.height,
+            meta=session.meta,
         )
     except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
