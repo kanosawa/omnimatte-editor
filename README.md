@@ -14,7 +14,7 @@ git clone --recursive https://github.com/kanosawa/omnimatte-editor
 
 ## Usage
 
-The backend runs on a GPU server and the frontend runs on a local machine, connecting through an SSH tunnel. Tested with Ubuntu for the backend and Windows for the frontend; other environments may also work.
+The backend runs on a GPU server(VRAM 30GB+) and the frontend runs on a local machine, connecting through an SSH tunnel. Tested with Ubuntu for the backend and Windows for the frontend; other environments may also work.
 
 - Backend: [backend/README.md](backend/README.md)
 - Frontend: [frontend/README.md](frontend/README.md)

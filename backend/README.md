@@ -5,7 +5,7 @@ Inference server. Tested on Ubuntu; other Linux distributions may also work.
 ## Recommended environment
 
 - Python 3.12+
-- NVIDIA GPU
+- NVIDIA GPU (VRAM 30GB+)
 - PyTorch 2.8 + CUDA 12.8
 - `ffmpeg` on PATH
 
