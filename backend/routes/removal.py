@@ -5,7 +5,7 @@ import tempfile
 from fastapi import APIRouter, HTTPException, Response
 
 from backend.config import MODEL_STARTUP_TIMEOUT_SEC
-from backend.ml.casper import run_casper
+from backend.ml.casper import casper
 from backend.ml.sam import sam2
 from backend.state.session import session_slot
 
@@ -38,7 +38,7 @@ async def remove_foreground() -> Response:
     base_video_path = session.base_video_path
 
     try:
-        mp4_bytes = await run_casper(
+        mp4_bytes = await casper.run(
             base_video_path=base_video_path,
             trimask=record.trimask,
             meta=session.meta,

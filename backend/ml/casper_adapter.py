@@ -39,7 +39,7 @@ def _build_default_config():
     return cfg
 
 
-class CasperPipeline:
+class CasperAdapter:
     def __init__(self) -> None:
         from inference.wan21_fun import predict_v2v
         self._cfg = _build_default_config()
